@@ -1,0 +1,123 @@
+# =========================================
+# Python 표준
+# =========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =========================================
+# 가상 환경 (어느 도구를 쓰든 모두 포함)
+# =========================================
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# =========================================
+# IDE / 편집기
+# =========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =========================================
+# 본 프로젝트 학습 산출물 (대용량, git에 부적합)
+# =========================================
+# Stable-Baselines3 체크포인트
+*.zip
+checkpoints/
+models/
+
+# wandb 로컬 run 폴더 (서버에 sync되므로 로컬은 무시)
+wandb/
+
+# Optuna sqlite storage (autoresearch 운영 spec §16.6.5)
+*.db
+*.db-journal
+autoresearch.db
+
+# TensorBoard 로그 (혹시 사용 시)
+runs/
+tb_logs/
+
+# Generator 가 만든 시나리오 캐시 (seed YAML 만 추적, 캐시는 무시)
+scenarios/**/*.pkl
+scenarios/**/*.npz
+scenarios/**/*_cache/
+scenarios/**/__rendered__/
+
+# 단, manual_seeds 는 추적해야 함 (FAILURE_LOG dynamic source, §11.0.5)
+!scenarios/**/manual_seeds/
+!scenarios/**/manual_seeds/*.yaml
+
+# 핸드오프 산출물 (정책 파일은 대용량이라 무시, JSON 리포트만 추적)
+handoffs/**/*.zip
+handoffs/**/*.pt
+handoffs/**/*.pth
+
+# =========================================
+# 시각화 임시 출력
+# =========================================
+*.mp4
+*.gif
+renders/
+plots/*.png
+!plots/.gitkeep
+
+# =========================================
+# 환경변수 / 비밀
+# =========================================
+.env
+.env.local
+.env.*.local
+secrets/
+*.key
+*.pem
+
+# wandb API 키 (보통 ~/.netrc에 저장되나 만일을 위해)
+.netrc
+
+# =========================================
+# Jupyter
+# =========================================
+.ipynb_checkpoints/
+*.ipynb_meta
+
+# =========================================
+# 로그 / 임시 파일
+# =========================================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+
+# =========================================
+# Claude Code CLI 작업 부산물 (있을 경우)
+# =========================================
+.claude/cache/
+.claude/tmp/
+# .claude/settings.json 같은 설정은 추적할 수도, 무시할 수도 있음 — 팀 컨벤션에 따라
+
+# =========================================
+# OS 부산물
+# =========================================
+.DS_Store
+.Trashes
+desktop.ini
