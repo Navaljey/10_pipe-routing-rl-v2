@@ -1817,6 +1817,190 @@ PBS 4 대 조건 (state-only / terminal=0 / γΦ(s')-Φ(s) / γ_PBS == γ_PPO) �
 
 ---
 
+## Session 2026-06-25 — harness engineering 첫 세션: skill 충돌 + PBS 검증 강화
+
+### 세션 배경
+
+2026-06-24 \_ing 졸업 직후 Claude Code CLI 에서 harness engineering 첫 작업 진행.
+권장 첫 작업인 `shaping/potential_based.py` (PotentialBasedShaping helper class) 구현 중
+**CLI 자동 로드 skill 의 spec (120-dim / 27-action) 이 졸업판 SKILL.md (150-dim / 7-direction) 와 충돌**하는 사태 발견.
+진단 3단계 거쳐 원인 확정 후 해결 방안 수립.
+부수적으로 PBS state-only 검증 방법 보강안 도출.
+
+FAILURE_LOG 2026-06-25 entry 에 전체 분석 기록됨.
+
+---
+
+### 핵심 의사결정 22 — PBS state-only 검증 강화
+
+#### 배경
+
+SKILL.md §3.5 의 `PotentialBasedShaping` helper class 가 PBS 조건 1 (state-only 시그니처) 을
+`inspect.signature()` 의 parameter 수 (== 1) 로 검증함. 이 검증 방식의 한계:
+- parameter 수만 체크하면 클로저 (closure) 로 외부 상태를 캡처해도 통과 가능
+- `lambda s: f(s, some_action)` 같은 action-dependent 함수도 단일 parameter 이면 통과
+
+#### 결론
+
+**`inspect.signature()` 단독 검증 → 런타임 추가 검사 + unit test 의무화 조합으로 강화.**
+
+```python
+# 추가 검증 (helper class __init__ 내):
+# 1. co_freevars 에 action-related 이름 포함 시 경고 로깅
+if any('action' in v or 'act' in v for v in phi_fn.__code__.co_freevars):
+    warnings.warn(
+        "PBS 조건 1 주의: phi_fn 이 action-related 이름을 closure 로 캡처 중. "
+        "state-only 여부를 수동 검증하시오.",
+        PBSSafetyWarning
+    )
+```
+
+`tests/test_pbs_safety.py` 에 클로저 케이스 명시적 추가 의무:
+```python
+# 추가해야 할 test case
+def test_closure_capturing_action_raises_warning():
+    action = 1
+    phi_with_action = lambda s: s[action]  # action-dependent closure
+    with pytest.warns(PBSSafetyWarning):
+        PotentialBasedShaping(phi_fn=phi_with_action, gamma_ppo=0.99)
+```
+
+#### 근거
+
+PBS 조건 1 위반은 shaping reward 가 action-dependent 가 되어 정책 보존 이론 붕괴 (Ng 1999).
+`len(sig.parameters) == 1` 은 필요 조건이나 충분 조건 아님. 클로저 경고 + unit test 로 보강.
+
+#### 기각된 대안
+
+- **mypy type checking 단독**: 런타임 lambda / closure 에는 적용 불가
+- **완전한 정적 AST 분석**: 클로저 의존성 분석은 AST 로도 불완전 (동적 binding 추적 불가)
+
+#### SKILL / 코드 영향
+
+- `shaping/potential_based.py`: `__init__` 에 `co_freevars` 경고 추가
+- `tests/test_pbs_safety.py`: 클로저 케이스 추가
+- SKILL.md §6.4 절대 하지 말 것: "signature parameter 수 1개 == state-only 확정으로 단정" 금지 추가
+
+---
+
+### 핵심 의사결정 23 — skill 시스템 충돌 해결 (Option A-1 채택)
+
+#### 배경
+
+CLI 첫 진입 시 자동 로드된 서버 등록 skill (v1 시절 등록, 120-dim / 27-action) 이
+졸업판 SKILL.md (150-dim / 7-direction) 와 충돌.
+전체 분석은 FAILURE_LOG 2026-06-25 entry 참조.
+
+**핵심 구조적 원인**: 졸업 작업 (의사결정 21) 이 로컬 파일 갱신만 포함하고
+서버 skill 갱신을 체크리스트에 포함하지 않음.
+
+#### 후보 검토
+
+| 옵션 | 내용 | 장점 | 단점 |
+|------|------|------|------|
+| **A-1. In-place 갱신** | 서버 skill → SKILL.md 내용으로 업데이트 | 단일 출처, 관리 단순 | 수동 작업 의무 |
+| B. 병행 운영 | 두 출처 공존, spec 버전으로 구별 | 롤백 쉬움 | 관리 복잡도 2배 |
+| C. 서버 skill 삭제 | 서버 skill 제거, 로컬 SKILL.md 만 | 충돌 원천 제거 | CLI 자동 로드 비활성화 위험 |
+
+#### 결론
+
+**Option A-1 (In-place 갱신) 채택.**
+
+수립된 운영 원칙:
+
+```
+[로컬 SKILL.md = source of truth. 서버 skill = mirror.]
+
+SKILL 갱신 순서 (절대 준수):
+1. 로컬 SKILL.md 수정
+2. git commit (로컬 이력 보존)
+3. 서버 skill in-place 갱신 (SKILL.md 내용 그대로)
+4. CLI 새 세션 진입 → 로드 skill 검증
+   (obs-dim 150 / action 7-direction / 졸업 날짜 / 활성 Lock 목록)
+```
+
+#### 근거
+
+- 단일 출처가 관리 복잡도 최소화 (B 옵션 대비)
+- CLI 자동 로드 유지가 사용자 경험에 중요 (C 옵션 대비)
+- 수동 작업 의무는 §0.5 체크리스트로 강제
+
+#### SKILL.md / CLAUDE.md 영향
+
+- SKILL.md §0.5 신설 — 서버 등록 skill 동기 의무 + 갱신 순서 + 충돌 감지 체크
+- CLAUDE.md §101 졸업 후 운영 원칙에 항목 6 추가 — 서버 skill 동기화
+
+---
+
+### 핵심 의사결정 24 — 졸업 범위 확장 (서버 skill 동기화 의무 추가)
+
+#### 배경
+
+의사결정 21 의 \_ing 졸업 체크리스트:
+```
+1. 로컬 파일 rename
+2. 각 파일 헤더 갱신
+3. Cross-reference 일괄 갱신
+4. git commit
+```
+**서버 측 등록 skill 갱신 누락** → 의사결정 23 충돌의 근본 원인.
+
+#### 결론
+
+**\_ing 시스템 졸업 체크리스트 v2 (의사결정 24 반영):**
+
+```
+[v2 체크리스트]
+1. 로컬 파일 rename (CLAUDE_ing → CLAUDE, SKILL_ing → SKILL, PROGRESS_ing → PROGRESS)
+2. 각 파일 헤더 갱신 (졸업 안내, v1.0 버전)
+3. Cross-reference 일괄 갱신
+4. git commit
+5. ★ 서버 등록 skill in-place 갱신 (로컬 SKILL.md 내용으로)  ← 신규 추가
+6. ★ CLI 새 세션 진입 → skill 로드 확인 (obs-dim / action-space / 졸업 날짜)  ← 신규 추가
+```
+
+항목 5, 6 이 신규 추가. 본 세션이 항목 6 의 첫 실증.
+
+#### 근거
+
+- 서버 skill 갱신은 수동 작업이므로 체크리스트 없이는 반드시 누락됨
+- 항목 6 (CLI 검증) 이 동기화 완료를 자기 확인 (self-verification) 가능하게 함
+- 본 사례 (의사결정 23) 가 체크리스트 필요성의 직접 증거
+
+#### 기각된 대안
+
+- **자동 동기화 hook (git post-commit)**: 구현 복잡도 과도. 수동 체크리스트가 현 규모에 적합.
+- **로컬 SKILL.md 만 사용 (서버 skill 비등록)**: CLI 자동 로드 비활성화 위험.
+
+---
+
+### 본 세션의 Claude 자기 비판
+
+- 의사결정 21 (졸업) 당시 harness engineering 환경에서 로컬 파일과 서버 skill 이 분리된다는 것을 인식하지 못해 서버 skill 갱신을 체크리스트에 누락.
+- 진단 1차에서 가정 기반 추론 (디스크 확인 없이 "자동 갱신됐을 것"). 3차 이후에야 디스크 증거로 확정. **디스크 증거 우선 원칙** 의 소중함 재확인.
+
+---
+
+### 본 세션의 작업 산출물
+
+```
+├── FAILURE_LOG.md  (2026-06-25 entry 추가 — skill 충돌 사례 전체 기록)
+├── PROGRESS.md     (본 Session 2026-06-25 추가 — 의사결정 22/23/24)
+├── SKILL.md        (§0.5 신설 — 서버 등록 skill 동기 의무 + 갱신 순서)
+└── CLAUDE.md       (§101 의사결정 22/23/24 추가 + 졸업 후 운영 원칙 항목 6 추가)
+```
+
+---
+
+### 다음 세션 진입점
+
+1. 서버 skill in-place 갱신 완료 후 (의사결정 23 Option A-1 실행)
+2. harness engineering 재개: `shaping/potential_based.py` + `tests/test_pbs_safety.py`
+   - 의사결정 22 반영: PBS state-only closure 경고 + unit test 클로저 케이스 추가
+3. 이후 권장 구현 순서는 PROGRESS.md Session 2026-06-24 § "권장 구현 순서" 참조
+
+---
+
 ## §101. Lock 해제 로그 (CLAUDE.md §101 미러)
 
 | 일자 | 항목 | 결론 요약 | 본 문서 참조 |
@@ -1838,13 +2022,16 @@ PBS 4 대 조건 (state-only / terminal=0 / γΦ(s')-Φ(s) / γ_PBS == γ_PPO) �
 | 2026-06-18 | 의사결정 19 신규 | L-16.3-w 해제 — baseline 가중치 (w1=0.1, w2=2.0, w3=50.0, sweep 27 variants) | Session 2026-06-18 |
 | 2026-06-18 | 의사결정 20 신규 | L-A6 해제 — Generator v1.0.0 (Poisson disk + cuboid + rejection sampling) | Session 2026-06-18 |
 | 2026-06-24 | 의사결정 21 신규 | 🎓 \_ing 시스템 졸업 — CLAUDE_ing/SKILL_ing/PROGRESS_ing → CLAUDE/SKILL/PROGRESS. 차단 의미 전환. 문서 v1.0. | Session 2026-06-24 |
+| 2026-06-25 | 의사결정 22 신규 | PBS state-only 검증 강화 — closure 경고 + unit test 클로저 케이스 추가 | Session 2026-06-25 |
+| 2026-06-25 | 의사결정 23 신규 | skill 시스템 충돌 해결 — Option A-1 (in-place 갱신) 채택, 로컬 SKILL.md = source of truth | Session 2026-06-25 |
+| 2026-06-25 | 의사결정 24 신규 | 졸업 범위 확장 — 체크리스트 v2 (서버 skill 동기화 + CLI 검증 항목 추가) | Session 2026-06-25 |
 
 > Lock **해제** 가 아니라 상위 **의사결정 재검토** 결과임에 유의. L-B1, L-B2, L-B3, L-B4, L-12.2, L-17.1은 "해제"가 아니라 "Hierarchical 폐기 부수효과로 항목 자체 폐기". 2026-06-18 의사결정 14, 16, 17, 18, 19, 20 은 진짜 Lock 해제.
 
 ---
 
-**문서 버전:** v1.0 (🎓 졸업판)
+**문서 버전:** v1.1
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-24 (Session 2026-06-24 추가: 의사결정 21 \_ing 시스템 졸업. 첫 헤더 갱신, cross-reference 일괄 갱신)
-**이전 갱신:** 2026-06-18 v0.6 (의사결정 18/19/20), 2026-06-18 v0.5 (의사결정 17), 2026-06-11, 2026-05-14, 2026-04-30 (프로젝트 시작)
-**다음 갱신 시점:** Phase 1 결과 분석 후 의사결정 22 (L-A3' 해제 등)
+**마지막 갱신:** 2026-06-25 (Session 2026-06-25 추가: 의사결정 22/23/24 — skill 충돌 + PBS 검증 강화)
+**이전 갱신:** 2026-06-24 v1.0 (의사결정 21 \_ing 졸업), 2026-06-18 v0.6 (의사결정 18/19/20), 2026-06-18 v0.5 (의사결정 17), 2026-06-11, 2026-05-14, 2026-04-30 (프로젝트 시작)
+**다음 갱신 시점:** Phase 1 결과 분석 후 의사결정 25 (L-A3' 해제 등)

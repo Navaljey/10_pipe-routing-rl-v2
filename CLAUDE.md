@@ -1786,15 +1786,18 @@ Lock ID는 `L-{카테고리}{일련번호}` 또는 `L-{spec 섹션}-{tag}` 형�
 | 2026-06-18 | **§16.3.1~3 채움** | baseline reward 가중치 — Step 1 초기값 + sweep 범위 + 상대 스케일 원칙 (L-16.3-w 해제, 의사결정 19) |
 | 2026-06-18 | **§11.0.8 신설** | Procedural Scenario Generator v1.0.0 알고리즘 — Poisson disk + rejection sampling (L-A6 해제, 의사결정 20) |
 | 2026-06-24 | **🎓 \_ing 시스템 졸업** | CLAUDE_ing/SKILL_ing/PROGRESS_ing → CLAUDE/SKILL/PROGRESS. harness engineering 시작 가능 상태. 차단 표 의미 전환 (의사결정 21) |
+| 2026-06-25 | **PBS 검증 강화** | state-only closure 경고 + unit test 의무화 (의사결정 22) |
+| 2026-06-25 | **skill 충돌 해결** | Option A-1 채택. 로컬 SKILL.md = source of truth. SKILL.md §0.5 신설 (의사결정 23) |
+| 2026-06-25 | **졸업 체크리스트 v2** | 서버 skill 동기화 + CLI 검증 항목 추가. SKILL.md §0.5 (의사결정 24) |
 
 > Lock **해제** 가 아니라 상위 **의사결정 재검토** 결과임에 유의.
 
 ---
 
-**문서 버전:** v1.0 (🎓 졸업판, harness engineering 진행 가능)
+**문서 버전:** v1.1
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-24 (\_ing 시스템 졸업: CLAUDE_ing.md → CLAUDE.md, 차단 표 의미 전환, §99 헤더 갱신)
-**이전 갱신:** 2026-06-18 v0.6 (3개 Lock 추가 해제), 2026-06-18 v0.5 (L-A5/L-D1/L-D2 해제), 2026-06-11 (§99 Lock 명명 규칙), 2026-05-14 (Hierarchical 폐기)
+**마지막 갱신:** 2026-06-25 (§101 의사결정 22/23/24 추가. 졸업 후 운영 원칙 항목 6 추가)
+**이전 갱신:** 2026-06-24 v1.0 (\_ing 시스템 졸업), 2026-06-18 v0.6 (3개 Lock 추가 해제), 2026-06-18 v0.5 (L-A5/L-D1/L-D2 해제), 2026-06-11 (§99 Lock 명명 규칙), 2026-05-14 (Hierarchical 폐기)
 
 **졸업 후 spec 운영 원칙**:
 1. spec 결정 변경 시 — Claude AI 세션에서 4개 파일 일괄 수정
@@ -1802,6 +1805,7 @@ Lock ID는 `L-{카테고리}{일련번호}` 또는 `L-{spec 섹션}-{tag}` 형�
 3. 학습 결과 분석 → 새 의사결정 — Claude AI 세션
 4. FAILURE_LOG entry 추가 시 — 실패 케이스를 수작업 seed pool 로 영구 등록 (§11.0.5)
 5. vibe coding 금지 원칙 유지 — 새 결정 필요 시 별도 논의 세션
+6. SKILL.md 갱신 시 — 로컬 수정 → git commit → 서버 skill in-place 갱신 → CLI 검증 (의사결정 23, SKILL.md §0.5)
 
 **남은 활성 Lock 4개 — 자기 자연 시점 해제**:
 - L-A3' (Phase 1 결과 후 후행 결정)
