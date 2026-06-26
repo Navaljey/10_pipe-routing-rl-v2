@@ -214,6 +214,78 @@ Episode length 분포를 먼저 측정하고 reward scale 결정해야 함.
 
 > 본 entry는 placeholder 가 아닌 실제 실패 기록. 본 문서가 active learning resource 로 전환되는 시점.
 
+### 2026-06-25 — CLI 자동 로드 skill 과 졸업판 spec 충돌 (120-dim vs 150-dim / 27-action vs 7-direction)
+
+**상황:**
+harness engineering 첫 작업 (PBS helper class 구현, `PotentialBasedShaping`) 진행 중
+CLI 가 자동 로드한 서버 등록 skill 의 spec 이 졸업판 SKILL.md 와 상이함을 발견.
+
+**증상:**
+- CLI 자동 로드 skill (서버 등록 — v1 시절 등록): obs 120-dim, action 27-action
+- 졸업판 SKILL.md (로컬 파일): obs 150-dim, action 7-direction
+- 두 spec 이 정면 충돌 — 어느 것이 "진짜 spec" 인지 불분명한 상태에서 코드 작성 불가
+
+**원인 분석 (진단 3단계 진화):**
+
+[1차 추측 — 오진단]
+CLI 가 SKILL.md 를 읽지 못하거나, 서버 skill 이 로컬 파일을 덮어쓰는 것으로 추측.
+→ 오진단: 실제로는 두 출처가 독립적으로 동시 존재.
+
+[2차 부분 정정]
+서버 skill 과 로컬 SKILL.md 가 별도 경로임을 인식. 서버 skill 이 v1 시절 등록된 구버전일 가능성 제기.
+→ 방향은 맞으나 "서버 skill 이 자동 갱신됐을 것" 이라는 가정이 남음.
+
+[3차 디스크 증거 기반 확정]
+PowerShell `dir` + 파일 직접 확인 → SKILL.md 내용 (150-dim / 7-direction) 명시.
+skill list 에서 서버 등록 skill description → 120-dim / 27-action 확인.
+두 출처가 **동시에 독립적으로 존재**하며 CLI 는 둘 다 자동 로드.
+
+[확정 원인]
+사용자가 v1 시절 등록한 custom skill (120-dim / 27-action) 이 서버에 영구 보존됨.
+졸업 작업 (2026-06-24 의사결정 21) 에서 서버측 skill 갱신을 체크리스트에 포함하지 않은 것이 근본 원인.
+
+**해결책:**
+Option A-1 (in-place 갱신) 채택 (의사결정 23):
+- 서버 등록 skill 을 졸업판 SKILL.md 내용으로 in-place 업데이트
+- SKILL.md frontmatter `name` 필드 = 서버 등록 skill 이름과 정합화
+- 이후 SKILL 갱신 순서: 로컬 수정 → git commit → 서버 in-place 갱신 → CLI 검증 (의무)
+
+**교훈 (5가지):**
+
+1. **'졸업' 의 범위 재정의 필요**:
+   본 \_ing 시스템의 졸업 (의사결정 21) 은 로컬 파일 rename + 헤더 갱신만 포함.
+   **서버 등록 skill 갱신은 졸업 체크리스트에 없었음**. 의사결정 24 로 체크리스트에 추가.
+
+2. **CLI Claude 의 자기 정정 능력 신뢰 가능 + 디스크 증거 우선**:
+   진단 3단계에서 CLI 가 자체 가정을 수정하는 과정이 정상 작동.
+   "로컬 파일 vs 서버 등록" 구별은 디스크 직접 확인 없이는 가정에 기반할 수밖에 없음.
+   **디스크 증거가 항상 가정보다 우선**.
+
+3. **PowerShell 오류 의미 구별 필수 (캐시 비워짐 vs 파일 미존재)**:
+   PowerShell `Test-Path` / `Get-Content` 오류 시 "파일 미존재" 인지 "캐시 비워짐/권한 오류" 인지 즉시 구별.
+   오류 메시지 문구 (not found vs access denied) 확인이 필수.
+
+4. **skill 시스템 권위 모호 시 한 쪽을 source 로 명시**:
+   서버 등록 skill 과 로컬 SKILL.md 충돌 시 어느 쪽이 권위인지 명확히 해야 함.
+   본 프로젝트 결론: **로컬 SKILL.md 가 source of truth**. 서버 skill 은 mirror.
+
+5. **본 \_ing 시스템의 다음 진화 자료**:
+   harness engineering 첫 세션에서 발생한 메타 충돌 (spec 관리 인프라 자체의 결함).
+   \_ing 시스템의 "졸업" 개념을 서버 인프라까지 확장하는 계기 — 의사결정 24 의 직접 trigger.
+
+**관련 파일/위치:**
+- SKILL.md (로컬, source of truth) — 150-dim / 7-direction 정의
+- 서버 등록 skill — 갱신 전 120-dim / 27-action, 갱신 후 SKILL.md 와 동일
+- SKILL.md §0.5 (신설) — 서버 등록 skill 동기 의무
+- CLAUDE.md §101 (갱신) — 졸업 후 운영 원칙 + 의사결정 22/23/24 추가
+
+**관련 의사결정:**
+- 의사결정 22 (2026-06-25) — PBS state-only 검증 강화
+- 의사결정 23 (2026-06-25) — skill 시스템 충돌 해결 (Option A-1)
+- 의사결정 24 (2026-06-25) — 졸업 범위 확장 (서버 skill 동기화 의무 추가)
+
+---
+
 ### 2026-06-11 — spec 자체의 회귀 검증 체계 미완성 + Lock 명명 규칙 암묵화
 
 **상황:**
@@ -401,11 +473,9 @@ Autoresearch 결과:
 
 ---
 
-**문서 버전:** v1.0 (🎓 졸업판, entry 2개)
+**문서 버전:** v1.1 (🎓 졸업판, entry 3개)
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-24 (졸업판 동기화: 첫 헤더 갱신, cross-reference 일괄 갱신. entry 추가 없음 — 졸업은 실패 사례 아님)
-**이전 갱신:** 2026-06-18 (§0.1 dynamic source 역할), 2026-06-11 (2026-06-11 entry), 2026-05-14 (첫 entry)
-**최신 entry:** 2026-06-11 — spec 자체의 회귀 검증 체계 미완성 + Lock 명명 규칙 암묵화
-**첫 entry:** 2026-05-14 — Phase 1 비효율 경로 + Hierarchical 가설 오진단
-**최신 entry:** 2026-06-11 — spec 자체의 회귀 검증 체계 미완성 + Lock 명명 규칙 암묵화
+**마지막 갱신:** 2026-06-25 (2026-06-25 entry 추가 — skill 충돌 사례. 의사결정 22/23/24)
+**이전 갱신:** 2026-06-24 (졸업판 동기화), 2026-06-18 (§0.1 dynamic source 역할), 2026-06-11 (2026-06-11 entry), 2026-05-14 (첫 entry)
+**최신 entry:** 2026-06-25 — CLI 자동 로드 skill 과 졸업판 spec 충돌 (120-dim vs 150-dim / 27-action vs 7-direction)
 **첫 entry:** 2026-05-14 — Phase 1 비효율 경로 + Hierarchical 가설 오진단
