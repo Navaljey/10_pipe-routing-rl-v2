@@ -1,0 +1,245 @@
+# pyproject.toml — pipe-routing-rl-v2
+#
+# Poetry 2.x + PEP 621 표준 형식.
+# 본 프로젝트는 라이브러리가 아니라 application 이므로 package-mode = false.
+#
+# 본 프로젝트 spec 정합 (CLAUDE.md / SKILL.md v1.0 졸업판 기준, 2026-06-24):
+#   - RL: sb3-contrib MaskablePPO + Gymnasium (SKILL §3.1 절대 변경 금지 항목)
+#   - autoresearch: Optuna TPE + MedianPruner + sqlite (CLAUDE.md §16.6.5)
+#   - 가시성: wandb 모든 run 의무 (CLAUDE.md §16.6.6, SKILL §3.6)
+#   - 시각화: matplotlib + IPython HTML 만 (SKILL §3.2)
+#     ※ Plotly, PyVista, 가상 디스플레이 금지 (절대 변경 금지 항목)
+#   - 시나리오: numpy.random.default_rng(seed) PCG64 만 (CLAUDE.md §11.0.6)
+#   - SDF 계산: scipy.ndimage.distance_transform_edt
+#
+# PyTorch 처리:
+#   - Colab T4 환경에서는 이미 설치되어 있으므로 pyproject.toml 에는 명시만
+#   - 로컬 개발 시 CUDA 버전 호환은 사용자가 별도 처리 (README 안내 참조)
+
+[project]
+name = "pipe-routing-rl-v2"
+version = "1.0.0"
+description = "3D 공간 파이프 자동 배치 강화학습 (단일 에이전트 + 전이학습 + Dense Reward (PBS) + autoresearch)"
+authors = [
+    { name = "Project Owner", email = "" },
+]
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "Proprietary" }
+keywords = ["reinforcement-learning", "pipe-routing", "ppo", "transfer-learning", "potential-based-shaping"]
+
+# ─────────────────────────────────────────────────────────────────
+# 핵심 의존성 (Phase 1 학습 시작에 필수)
+# ─────────────────────────────────────────────────────────────────
+dependencies = [
+    # ── RL 코어 ─────────────────────────────────────────────────
+    # SKILL §3.1: RL 알고리즘 = sb3-contrib MaskablePPO (변경 절대 금지)
+    "gymnasium >=0.29.1, <2.0",
+    "stable-baselines3 >=2.3.0, <3.0",
+    "sb3-contrib >=2.3.0, <3.0",          # MaskablePPO 제공
+    "torch >=2.0.0, <3.0",                # SB3 underlying framework
+    
+    # ── 수치 / 과학 계산 ────────────────────────────────────────
+    # CLAUDE.md §11.0.6: RNG = numpy.random.default_rng(seed) PCG64 만
+    "numpy >=1.24, <3.0",
+    # scipy.ndimage.distance_transform_edt 등 SDF 계산
+    "scipy >=1.10, <2.0",
+    
+    # ── autoresearch (CLAUDE.md §16.6.5) ──────────────────────
+    # TPE + MedianPruner + sqlite storage
+    "optuna >=3.4, <5.0",
+    # SB3 통합 콜백 등
+    "optuna-integration >=3.4, <5.0",
+    
+    # ── 가시성 (CLAUDE.md §16.6.6, SKILL §3.6) ─────────────────
+    "wandb >=0.16, <1.0",
+    
+    # ── 시각화 (SKILL §3.2: 본 두 가지만 허용) ──────────────────
+    # ※ Plotly, PyVista, xvfb 사용 금지 (절대 변경 금지)
+    "matplotlib >=3.7, <4.0",
+    "ipython >=8.0, <10.0",               # IPython.display.HTML 렌더링
+    
+    # ── 시나리오 / 데이터 ────────────────────────────────────────
+    # CLAUDE.md §11.0.6: scenarios/*.yaml seed 파일 관리
+    "pyyaml >=6.0, <7.0",
+    
+    # ── 유틸리티 ─────────────────────────────────────────────────
+    "tqdm >=4.65, <5.0",                  # 학습 진행 표시
+]
+
+# ─────────────────────────────────────────────────────────────────
+# 선택적 의존성 그룹 (poetry install --with dev)
+# ─────────────────────────────────────────────────────────────────
+[project.optional-dependencies]
+
+# dev: 테스트 / 린팅 / 타입 체크
+dev = [
+    # ── 테스트 (CLAUDE.md §16.7.5 PBS 4대 조건 unit test 등) ────
+    "pytest >=7.4, <9.0",
+    "pytest-cov >=4.1, <7.0",
+    "pytest-xdist >=3.5, <4.0",           # 병렬 테스트
+    
+    # ── 코드 품질 ────────────────────────────────────────────────
+    "ruff >=0.4, <1.0",                   # 린팅 + 포매팅 통합
+    "mypy >=1.7, <2.0",
+    
+    # ── Jupyter (Colab 호환성, 노트북 실험) ────────────────────
+    "jupyter >=1.0, <2.0",
+    "ipykernel >=6.27, <7.0",
+    
+    # ── git pre-commit (선택) ────────────────────────────────────
+    "pre-commit >=3.5, <5.0",
+]
+
+# notebooks: Colab 노트북 환경에서만 필요한 추가 도구
+notebooks = [
+    "jupyter >=1.0, <2.0",
+    "ipykernel >=6.27, <7.0",
+    "nbformat >=5.9, <6.0",
+]
+
+
+# ─────────────────────────────────────────────────────────────────
+# 빌드 시스템
+# ─────────────────────────────────────────────────────────────────
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Poetry 본 프로젝트 설정
+# ─────────────────────────────────────────────────────────────────
+[tool.poetry]
+# 본 프로젝트는 application 이므로 패키지로 빌드하지 않음
+package-mode = false
+
+
+# ─────────────────────────────────────────────────────────────────
+# pytest 설정
+# ─────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+minversion = "7.4"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+    # 본 프로젝트 PBS / Generator / 회귀 callback 테스트 coverage 추적
+    "--cov=envs",
+    "--cov=shaping",
+    "--cov=generators",
+    "--cov=autoresearch",
+    "--cov=training",
+    "--cov-report=term-missing",
+    "--cov-report=html:htmlcov",
+]
+markers = [
+    "slow: 1초 이상 걸리는 테스트 (학습 통합 테스트 등)",
+    "pbs: PBS 4대 조건 검증 (CLAUDE.md §16.7.5)",
+    "generator: Procedural Generator v1.0.0 (CLAUDE.md §11.0.8)",
+    "regression: 회귀 감시 (CLAUDE.md §12.3)",
+    "coord: 좌표계 변환 단위 테스트 (CLAUDE.md §9, L-C4)",
+]
+filterwarnings = [
+    # SB3 의 gym → gymnasium 마이그레이션 경고 등은 무시
+    "ignore::DeprecationWarning:gymnasium",
+    "ignore::UserWarning:stable_baselines3",
+]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Ruff 설정 (린팅 + 포매팅 통합)
+# ─────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "wandb",
+    "scenarios",
+    "handoffs",
+    ".venv",
+    "*.ipynb",                            # Jupyter notebook 은 별도
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort (import 정렬)
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "C90",  # mccabe complexity
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (matplotlib / 긴 reward 식 등 허용)
+    "N803",   # argument name should be lowercase (Φ, α, β 같은 수학 기호 변수명 허용)
+    "N806",   # variable in function should be lowercase (위와 동일)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "S101",   # assert 사용 허용 (pytest)
+    "PLR2004", # magic value 허용 (테스트 임계값 등)
+]
+"__init__.py" = ["F401"]  # 미사용 import 허용 (re-export 패턴)
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+
+# ─────────────────────────────────────────────────────────────────
+# mypy 설정 (type 체크)
+# ─────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+# SB3 / Gymnasium / wandb 등은 type stub 미흡, 점진 도입
+ignore_missing_imports = true
+# 본 프로젝트 코드는 엄격
+disallow_untyped_defs = false             # 점진 도입 (시작은 false)
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+ignore_errors = true                      # 테스트는 type 체크 완화
+
+
+# ─────────────────────────────────────────────────────────────────
+# Coverage 설정
+# ─────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+branch = true
+source = ["envs", "shaping", "generators", "autoresearch", "training"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+    "*/conftest.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = false
