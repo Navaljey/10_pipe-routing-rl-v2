@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import numpy.typing as npt
 import pytest
 
 from envs.base_env import JIS_EFF_RADIUS_MM
@@ -15,7 +14,14 @@ class ConcreteStep1Env(Step1Env):
 
     _sample_scenario() 를 고정 설정으로 구현해 generator 없이 동작.
     장애물 없는 빈 grid, agent(5,5,5), goal(25,25,25).
+    alpha=0, beta=0 으로 PBS shaping 비활성화 → baseline reward 만 검증 가능.
     """
+
+    def __init__(self, **kwargs: object) -> None:
+        # PBS shaping 비활성화: alpha=beta=0 으로 shaping reward=0 보장
+        kwargs.setdefault("alpha", 0.0)
+        kwargs.setdefault("beta", 0.0)
+        super().__init__(**kwargs)
 
     def _sample_scenario(self) -> None:
         self.occupancy[:] = False
@@ -27,9 +33,6 @@ class ConcreteStep1Env(Step1Env):
         self.pipe_effective_radius_mm = float(JIS_EFF_RADIUS_MM[8])
         self.pipe_type_idx = 0  # T1
         self.pipe_gravity = False
-
-    def _get_action_mask(self) -> npt.NDArray[np.bool_]:
-        return np.ones(7, dtype=np.bool_)
 
 
 @pytest.fixture

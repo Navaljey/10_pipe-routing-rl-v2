@@ -232,6 +232,11 @@ class BaseEnv(Env, ABC):
         # CLAUDE.md §11.0.6: PCG64 (default_rng) 만 사용
         self._episode_rng: np.random.Generator = np.random.default_rng(seed)
 
+        # PBS shaping 용 이전 obs (reset/step 에서 갱신, CLAUDE.md §16.7)
+        self._prev_obs: npt.NDArray[np.float64] = np.zeros(OBS_DIM, dtype=np.float64)
+        # _sample_scenario() 에 외부 seed 전달 (reset(seed=N) 시 설정)
+        self._forced_scenario_seed: int | None = None
+
         # 회귀 감시 callback 자리 (단계 4, SKILL §3.7, CLAUDE.md §12.3)
         self._regression_callback: Any | None = None
 
@@ -331,7 +336,9 @@ class BaseEnv(Env, ABC):
         if seed is not None:
             self._episode_rng = np.random.default_rng(seed)
 
+        self._forced_scenario_seed = seed
         self._sample_scenario()
+        self._forced_scenario_seed = None
 
         # episode reset 시 SDF 1회 계산 (CLAUDE.md §4.3)
         self._compute_full_sdf()
@@ -349,6 +356,7 @@ class BaseEnv(Env, ABC):
         self._termination_reason = ""
 
         obs = self._get_obs()
+        self._prev_obs = obs  # PBS shaping 초기화 (CLAUDE.md §16.7)
         return obs, {
             "start_cell": self.agent_cell.copy(),
             "goal_cell": self.goal_cell.copy(),
@@ -391,12 +399,17 @@ class BaseEnv(Env, ABC):
             self._termination_reason = "timeout"
 
         self._last_action = action
-        reward: float = self._calc_reward(action, terminated, truncated)
+        reward_baseline: float = self._calc_reward(action, terminated, truncated)
         obs = self._get_obs()
-        return obs, reward, terminated, truncated, {
+        is_terminal: bool = terminated or truncated
+        reward_shape: float = self._calc_shape(self._prev_obs, obs, is_terminal)
+        self._prev_obs = obs
+        return obs, reward_baseline + reward_shape, terminated, truncated, {
             "termination": self._termination_reason,
             "step_count": self._step_count,
             "path_length": len(self.path),
+            "reward_baseline": reward_baseline,   # wandb §16.7.8
+            "reward_shape": reward_shape,
         }
 
     def render(self) -> None:
@@ -404,6 +417,23 @@ class BaseEnv(Env, ABC):
 
     def close(self) -> None:
         pass
+
+    # ── Public interface (sb3-contrib MaskablePPO 호환) ─────────────────────────
+
+    def action_masks(self) -> npt.NDArray[np.bool_]:
+        """MaskablePPO 호환 public interface. CLAUDE.md §12.5."""
+        return self._get_action_mask()
+
+    # ── Shaping (default no-op, Step1Env 에서 override) ─────────────────────────
+
+    def _calc_shape(
+        self,
+        s: npt.NDArray[np.float64],
+        s_next: npt.NDArray[np.float64],
+        is_terminal: bool,
+    ) -> float:
+        """PBS shaping reward. 기본값 0.0 (shaping 없음). CLAUDE.md §16.7."""
+        return 0.0
 
     # ── Abstract methods (하위 클래스 구현) ────────────────────────────────────
 
