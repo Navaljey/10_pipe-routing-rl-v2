@@ -2026,8 +2026,68 @@ SKILL 갱신 순서 (절대 준수):
 | 2026-06-25 | 의사결정 23 신규 | skill 시스템 충돌 해결 — Option A-1 (in-place 갱신) 채택, 로컬 SKILL.md = source of truth | Session 2026-06-25 |
 | 2026-06-25 | 의사결정 24 신규 | 졸업 범위 확장 — 체크리스트 v2 (서버 skill 동기화 + CLI 검증 항목 추가) | Session 2026-06-25 |
 | 2026-06-28 | 의사결정 25 신규 | Step 별 핸드오프 폴더 분리 의무 — `base_dir/step{N}/` 자동 생성 | Session 2026-06-28 |
+| 2026-06-28 | 의사결정 26 신규 | Sub-단계 5.1 baseline 결과 archive — Phase 1 첫 실증 evidence 공식 기록 | Session 2026-06-28 |
 
 > Lock **해제** 가 아니라 상위 **의사결정 재검토** 결과임에 유의. L-B1, L-B2, L-B3, L-B4, L-12.2, L-17.1은 "해제"가 아니라 "Hierarchical 폐기 부수효과로 항목 자체 폐기". 2026-06-18 의사결정 14, 16, 17, 18, 19, 20 은 진짜 Lock 해제.
+
+---
+
+## Session 2026-06-28 — Sub-단계 5.1 baseline 1회 학습 결과 (의사결정 26)
+
+### 배경
+
+2026-06-24 `_ing` 졸업판 작성 후 env class 4단계 완성 (단계 1~4):
+- 단계 1: BaseEnv + L-C4 좌표 unit test (의사결정 21 졸업 직후)
+- 단계 2: 150-dim obs + baseline reward w1~w5
+- 단계 3: action mask + PBS integration + generator 연결
+- 단계 4: regression callback + handoff interface
+
+Sub-단계 5.1 에서 `training/train_step1.py` 작성 후 50K timestep baseline 학습 실행 (CPU, Easy 난이도, offline wandb).
+
+### 핵심 의사결정 26 — 5.1 결과 archive 화
+
+#### 학습 결과 (50K timestep, Easy, CPU)
+
+| 지표 | 값 | 비고 |
+|------|-----|------|
+| `success_rate` (final_eval 50 ep) | **94.0%** | 통과 기준 > 5% ✅ |
+| PBS ratio (`r_shape/r_baseline`) | **0.631** | 정상 범위 0.1~1.0 중앙값 ✅ |
+| `ep_rew_mean` (추이) | −26.8 → +44.6 | 16K timestep 에서 부호 전환 |
+| `ep_len_mean` (추이) | 400 → 27 steps | 단조 감소 (수렴 신호) |
+| handoff/step1/ 파일 | 8개 모두 생성 | §13.1 의사결정 25 정합 ✅ |
+
+wandb run: `offline-run-20260628_053541-w3agqvfw` (offline 저장, cloud sync 명령: `wandb sync wandb/offline-run-20260628_053541-w3agqvfw`)
+
+#### 검증된 spec 영역
+
+1. **L-D2 해제 (Dense Reward Φ)**: α=1.0, β=0.1 초기값이 PBS ratio 0.63 을 산출. §16.7.8 정상 범위 (0.1~1.0) 중앙에 위치 → Φ 설계가 r_baseline 을 압도하지 않으면서 유효한 학습 신호로 기여.
+
+2. **L-16.3-w 해제 (baseline 가중치)**: §16.3.1 단위 분석 예측과 정합.
+   - 예측: 도달/미도달 net reward 차이 = +70 → 실제: +44.6 vs −26.8 (차이 +71)
+   - goal_bonus(w3=50) 가 sparse reward trap 을 방지하는 구조 검증.
+
+3. **env class 단계 1~4 정합**: 4단계 harness가 실제 MaskablePPO 학습과 통합 시 정상 작동 확인. `action_masks()`, `PotentialBasedShaping`, `ScenarioGenerator`, `RegressionCallback(Phase 1 no-op)` 모두 오류 없음.
+
+4. **핸드오프 인터페이스 (의사결정 25)**: `save_handoff()` → `handoff/step1/` 8개 파일 자동 생성. `load_handoff()` → `MaskablePPO.load()` 성공.
+
+#### 한정 조건 (일반화 금지)
+
+- **Easy 난이도만** 검증 (obstacle density 10%, dist 5~10 cell). Medium/Hard 미확보.
+- **50K timestep** (정상 2M 의 1/40). 수렴 여부 미확인.
+- **12 variants 중 1개** (α=1.0, β=0.1, w1/w2/w3 default 조합) 만 검증. autoresearch sweep 전.
+- CPU 실행 (T4/A100 대비 속도 차이 있음, reward 자체는 동일).
+
+#### 기각된 해석
+
+- "94% 가 Phase 1 ceiling 이다": 50K Easy 결과를 ceiling 으로 해석 금지. Medium/Hard 와 전체 2M 학습 완료 후 재평가 필요.
+- "autoresearch 생략 가능": 94% 는 Easy 단독 결과. autoresearch Round 1 (α×β 12 variants) 는 Medium/Hard 에서의 성능 최적화를 위해 예정대로 진행.
+
+#### 다음 단계
+
+Sub-단계 5.2 진입 — `autoresearch/` 모듈 작성:
+- Optuna TPE + MedianPruner (§16.6.5)
+- Round 1: α×β 12 variants Stage 1 (250K timestep 각)
+- wandb naming: `step1_round1_stage1_var{V:03d}` (§16.6.6)
 
 ---
 
@@ -2073,8 +2133,8 @@ base_dir/
 
 ---
 
-**문서 버전:** v1.2
+**문서 버전:** v1.3
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-28 (Session 2026-06-28 추가: 의사결정 25 — Step 별 핸드오프 폴더 분리)
-**이전 갱신:** 2026-06-25 v1.1 (의사결정 22/23/24), 2026-06-24 v1.0 (의사결정 21 \_ing 졸업), 2026-06-18 v0.6 (의사결정 18/19/20), 2026-06-18 v0.5 (의사결정 17), 2026-06-11, 2026-05-14, 2026-04-30 (프로젝트 시작)
-**다음 갱신 시점:** Phase 1 결과 분석 후 (L-A3' 해제 등)
+**마지막 갱신:** 2026-06-28 (Session 2026-06-28 추가: 의사결정 26 — Sub-단계 5.1 baseline 결과 archive)
+**이전 갱신:** 2026-06-28 v1.2 (의사결정 25), 2026-06-25 v1.1 (의사결정 22/23/24), 2026-06-24 v1.0 (의사결정 21 \_ing 졸업), 2026-06-18 v0.6 (의사결정 18/19/20), 2026-06-18 v0.5 (의사결정 17), 2026-06-11, 2026-05-14, 2026-04-30 (프로젝트 시작)
+**다음 갱신 시점:** Sub-단계 5.2 autoresearch Round 1 결과 후 (L-A3' 해제 검토 시작)
