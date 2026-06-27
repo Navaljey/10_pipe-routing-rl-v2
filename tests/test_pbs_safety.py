@@ -8,10 +8,12 @@
 각 테스트는 위 조건이 코드 레벨에서 hard-enforce 됨을 증명한다.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
-from shaping import PotentialBasedShaping
+from shaping import PotentialBasedShaping, PBSSafetyWarning
 from shaping.potential_based import PotentialBasedShaping as PBSDirect
 
 pytestmark = pytest.mark.pbs
@@ -53,6 +55,29 @@ def test_condition1_rejects_action_dependent_phi():
     """Φ(s, a) 처럼 인자가 2개면 거부 (action 의존)."""
     with pytest.raises(ValueError, match="조건 1"):
         PotentialBasedShaping(phi_fn=lambda s, a: 0.0, gamma_ppo=GAMMA)
+
+
+def test_condition1_warns_on_action_capturing_closure():
+    """closure 가 'action' 이름을 캡처하면 PBSSafetyWarning 을 발행한다 (의사결정 22).
+
+    lambda s: s[action] 은 parameter 가 1개이므로 signature 검증을 통과하지만,
+    외부 action 변수에 의존하므로 state-only 위반 가능성이 있다.
+    """
+    action = 2
+    phi_with_action = lambda s: float(s[action])  # noqa: E731 — 테스트 목적
+
+    with pytest.warns(PBSSafetyWarning, match="action"):
+        PotentialBasedShaping(phi_fn=phi_with_action, gamma_ppo=GAMMA)
+
+
+def test_condition1_no_warning_for_clean_closure():
+    """action-unrelated 이름만 캡처하는 closure 는 경고 없이 생성된다."""
+    scale = 0.5
+    phi_scaled = lambda s: -scale * float(np.linalg.norm(s))  # noqa: E731
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PBSSafetyWarning)
+        PotentialBasedShaping(phi_fn=phi_scaled, gamma_ppo=GAMMA)  # 경고 없어야 함
 
 
 def test_condition1_rejects_zero_arg_phi():

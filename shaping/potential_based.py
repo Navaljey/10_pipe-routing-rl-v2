@@ -16,11 +16,16 @@ Ng, Harada & Russell (1999) 의 PBS 는 다음 4대 조건 하에서 optimal pol
 from __future__ import annotations
 
 import inspect
+import warnings
 from collections.abc import Callable
 
 import numpy as np
 
-__all__ = ["PotentialBasedShaping"]
+
+class PBSSafetyWarning(UserWarning):
+    """PBS 조건 1 의 잠재적 위반 가능성을 알리는 경고."""
+
+__all__ = ["PotentialBasedShaping", "PBSSafetyWarning"]
 
 
 class PotentialBasedShaping:
@@ -66,6 +71,21 @@ class PotentialBasedShaping:
                 "PBS 조건 1 위반: Φ must be state-only (single argument). "
                 f"got signature {sig}"
             )
+
+        # 조건 1 보조 검증: closure 가 action-related 이름을 캡처하면 경고.
+        # signature 1개 == state-only 는 필요 조건일 뿐, closure 로 action 을
+        # 캡처해도 parameter 는 1개로 보인다 (의사결정 22).
+        _ACTION_HINTS = frozenset({"action", "act", "a", "cmd"})
+        captured = getattr(phi_fn, "__code__", None)
+        if captured is not None:
+            suspicious = _ACTION_HINTS.intersection(captured.co_freevars)
+            if suspicious:
+                warnings.warn(
+                    f"PBS 조건 1 주의: phi_fn 이 {suspicious} 를 closure 로 캡처 중. "
+                    "action-dependent 가 아닌지 수동 확인 필요.",
+                    PBSSafetyWarning,
+                    stacklevel=2,
+                )
 
         self.phi_fn = phi_fn
         self.gamma = gamma_ppo
