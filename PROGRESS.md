@@ -2056,7 +2056,9 @@ Sub-단계 5.1 에서 `training/train_step1.py` 작성 후 50K timestep baseline
 | `ep_len_mean` (추이) | 400 → 27 steps | 단조 감소 (수렴 신호) |
 | handoff/step1/ 파일 | 8개 모두 생성 | §13.1 의사결정 25 정합 ✅ |
 
-wandb run: `offline-run-20260628_053541-w3agqvfw` (offline 저장, cloud sync 명령: `wandb sync wandb/offline-run-20260628_053541-w3agqvfw`)
+wandb run: `offline-run-20260628_053541-w3agqvfw` (offline 저장)
+- cloud sync 명령: `python -m wandb sync wandb/offline-run-20260628_053541-w3agqvfw`
+- cloud URL: **PENDING_SYNC** — sync 완료 후 `handoff/step1/step1_wandb_run_url.txt` 및 본 entry 갱신 필요
 
 #### 검증된 spec 영역
 

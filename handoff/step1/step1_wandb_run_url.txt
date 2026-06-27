@@ -1,0 +1,2 @@
+﻿PENDING_SYNC: offline-run-20260628_053541-w3agqvfw
+Sync command: python -m wandb sync wandb/offline-run-20260628_053541-w3agqvfw
