@@ -1,7 +1,8 @@
-"""핸드오프 패키지 검증 — CLAUDE.md §13.1.
+"""핸드오프 패키지 검증 — CLAUDE.md §13.1, 의사결정 25.
 
 검증 범위:
-  - save_handoff() → 기대 파일 구조 생성
+  - Step 별 폴더 분리 의무 (의사결정 25): save_dir/step{N}/ 자동 생성
+  - save_handoff() → step{N}/ 하위 파일 구조 생성
   - load_handoff() → HandoffResult 스키마 정합
   - make_regression_report() Phase 1 빈 report / Step 2+ 정상 report
   - wandb URL 저장/로드 왕복
@@ -23,6 +24,7 @@ from training.handoff import (
     make_regression_report,
     save_handoff,
 )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. make_regression_report()
@@ -89,55 +91,95 @@ def test_handoff_config_extra_preserved() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. save_handoff() 파일 구조
+# 3. Step 별 폴더 분리 의무 (의사결정 25)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_save_handoff_creates_step_subfolder(tmp_path: Path) -> None:
+    """save_handoff() 가 save_dir/step{N}/ 서브폴더를 자동 생성한다. 의사결정 25."""
+    result_dir = save_handoff(step_n=1, save_dir=tmp_path)
+    expected_step_dir = tmp_path / "step1"
+    assert expected_step_dir.exists()
+    assert expected_step_dir.is_dir()
+    assert result_dir == expected_step_dir
+
+
+def test_save_handoff_step2_separate_folder(tmp_path: Path) -> None:
+    """Step 1, 2 핸드오프가 서로 독립된 폴더에 저장된다. 의사결정 25."""
+    save_handoff(step_n=1, save_dir=tmp_path)
+    save_handoff(step_n=2, save_dir=tmp_path)
+    assert (tmp_path / "step1").is_dir()
+    assert (tmp_path / "step2").is_dir()
+    # step1 파일이 step2 폴더 접근 불가 → 덮어쓰기 없음
+    assert (tmp_path / "step1" / "step1_regression_report.json").exists()
+    assert (tmp_path / "step2" / "step2_regression_report.json").exists()
+    assert not (tmp_path / "step1" / "step2_regression_report.json").exists()
+
+
+def test_save_handoff_all_files_inside_step_dir(tmp_path: Path) -> None:
+    """save_handoff() 가 생성하는 모든 파일이 step{N}/ 내부에 있다."""
+    url = "https://wandb.ai/test/runs/abc"
+    env_cfg = {"grid_shape": [30, 30, 30]}
+    save_handoff(step_n=1, save_dir=tmp_path, wandb_url=url, env_config=env_cfg)
+
+    step_dir = tmp_path / "step1"
+    # base_dir 에 파일이 직접 생성되면 안 됨
+    direct_files = [f for f in tmp_path.iterdir() if f.is_file()]
+    assert len(direct_files) == 0, f"base_dir 에 파일 직접 생성됨: {direct_files}"
+
+    # step_dir 에는 파일이 있어야 함
+    assert len(list(step_dir.iterdir())) > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. save_handoff() 파일 내용
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_save_handoff_creates_directory(tmp_path: Path) -> None:
     """save_dir 이 없어도 save_handoff() 가 자동 생성한다."""
-    save_dir = tmp_path / "new_subdir" / "step1_handoff"
-    result_dir = save_handoff(step_n=1, save_dir=save_dir)
+    base = tmp_path / "new_subdir" / "handoff"
+    result_dir = save_handoff(step_n=1, save_dir=base)
     assert result_dir.exists()
     assert result_dir.is_dir()
 
 
 def test_save_handoff_creates_model_meta(tmp_path: Path) -> None:
-    """save_handoff() 가 best_model_meta.json 을 생성한다."""
+    """save_handoff() 가 best_model_meta.json 을 step1/ 에 생성한다."""
     save_handoff(step_n=1, save_dir=tmp_path)
-    # best_model_meta.json (step-independent)
-    assert (tmp_path / "best_model_meta.json").exists()
+    assert (tmp_path / "step1" / "best_model_meta.json").exists()
 
 
 def test_save_handoff_creates_regression_report(tmp_path: Path) -> None:
-    """save_handoff() 가 stepN_regression_report.json 을 생성한다."""
+    """save_handoff() 가 step1_regression_report.json 을 step1/ 에 생성한다."""
     save_handoff(step_n=1, save_dir=tmp_path)
-    assert (tmp_path / "step1_regression_report.json").exists()
+    assert (tmp_path / "step1" / "step1_regression_report.json").exists()
 
 
 def test_save_handoff_creates_wandb_url_file(tmp_path: Path) -> None:
-    """save_handoff() 가 stepN_wandb_run_url.txt 를 생성한다."""
+    """save_handoff() 가 step1_wandb_run_url.txt 를 step1/ 에 생성한다."""
     url = "https://wandb.ai/navaljey/pipe-routing-rl/runs/abc123"
     save_handoff(step_n=1, save_dir=tmp_path, wandb_url=url)
-    txt_path = tmp_path / "step1_wandb_run_url.txt"
+    txt_path = tmp_path / "step1" / "step1_wandb_run_url.txt"
     assert txt_path.exists()
     assert txt_path.read_text(encoding="utf-8").strip() == url
 
 
 def test_save_handoff_creates_env_config(tmp_path: Path) -> None:
-    """env_config 제공 시 stepN_env_config.json 생성."""
+    """env_config 제공 시 step1_env_config.json 을 step1/ 에 생성."""
     env_cfg = {"grid_shape": [30, 30, 30], "max_steps": 500}
     save_handoff(step_n=1, save_dir=tmp_path, env_config=env_cfg)
-    path = tmp_path / "step1_env_config.json"
+    path = tmp_path / "step1" / "step1_env_config.json"
     assert path.exists()
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert loaded["grid_shape"] == [30, 30, 30]
 
 
 def test_save_handoff_creates_reward_config(tmp_path: Path) -> None:
-    """reward_config 제공 시 stepN_reward_config.json 생성."""
+    """reward_config 제공 시 step1_reward_config.json 을 step1/ 에 생성."""
     rwd_cfg = {"w1": 0.1, "w2": 2.0, "w3": 50.0, "alpha": 1.0, "beta": 0.1}
     save_handoff(step_n=1, save_dir=tmp_path, reward_config=rwd_cfg)
-    path = tmp_path / "step1_reward_config.json"
+    path = tmp_path / "step1" / "step1_reward_config.json"
     assert path.exists()
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert loaded["w3"] == pytest.approx(50.0)
@@ -146,18 +188,18 @@ def test_save_handoff_creates_reward_config(tmp_path: Path) -> None:
 def test_save_handoff_skips_optional_if_none(tmp_path: Path) -> None:
     """env_config=None 이면 해당 파일 미생성."""
     save_handoff(step_n=1, save_dir=tmp_path, env_config=None, reward_config=None)
-    assert not (tmp_path / "step1_env_config.json").exists()
-    assert not (tmp_path / "step1_reward_config.json").exists()
+    assert not (tmp_path / "step1" / "step1_env_config.json").exists()
+    assert not (tmp_path / "step1" / "step1_reward_config.json").exists()
 
 
 def test_save_handoff_model_none_no_zip(tmp_path: Path) -> None:
     """model=None 이면 best_model.zip 미생성."""
     save_handoff(step_n=1, save_dir=tmp_path, model=None)
-    assert not (tmp_path / "best_model.zip").exists()
+    assert not (tmp_path / "step1" / "best_model.zip").exists()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. load_handoff() 스키마 정합
+# 5. load_handoff() 스키마 정합
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -166,6 +208,13 @@ def test_load_handoff_returns_handoff_result(tmp_path: Path) -> None:
     save_handoff(step_n=1, save_dir=tmp_path)
     result = load_handoff(step_n=1, save_dir=tmp_path)
     assert isinstance(result, HandoffResult)
+
+
+def test_load_handoff_save_dir_is_step_dir(tmp_path: Path) -> None:
+    """load_handoff() 결과의 save_dir 가 base/step{N}/ 를 가리킨다."""
+    save_handoff(step_n=1, save_dir=tmp_path)
+    result = load_handoff(step_n=1, save_dir=tmp_path)
+    assert result.save_dir == tmp_path / "step1"
 
 
 def test_load_handoff_config_roundtrip(tmp_path: Path) -> None:
@@ -201,37 +250,34 @@ def test_load_handoff_model_path_none_when_no_zip(tmp_path: Path) -> None:
     assert result.model_path is None
 
 
-def test_load_handoff_missing_dir_raises(tmp_path: Path) -> None:
-    """존재하지 않는 디렉터리 → FileNotFoundError."""
-    with pytest.raises(FileNotFoundError):
-        load_handoff(step_n=1, save_dir=tmp_path / "nonexistent")
+def test_load_handoff_missing_step_dir_raises(tmp_path: Path) -> None:
+    """step{N}/ 폴더가 없으면 FileNotFoundError."""
+    with pytest.raises(FileNotFoundError, match="step1"):
+        load_handoff(step_n=1, save_dir=tmp_path)
 
 
 def test_load_handoff_missing_meta_raises(tmp_path: Path) -> None:
     """model_meta 없으면 FileNotFoundError."""
-    tmp_path.mkdir(exist_ok=True)
+    (tmp_path / "step1").mkdir()  # step dir 는 있지만 meta 없음
     with pytest.raises(FileNotFoundError, match="model_meta"):
         load_handoff(step_n=1, save_dir=tmp_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. 전이학습 인터페이스: 다음 Step 초기화용 model_path 획득
+# 6. 전이학습 인터페이스: 다음 Step 초기화용 model_path 획득
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_transfer_interface_model_path_usable(tmp_path: Path) -> None:
-    """load_handoff() 로 획득한 model_path 가 사용 가능한 경로 객체이다.
-
-    실제 모델 없이 경로 구조만 검증 (model=None 케이스).
-    """
+    """load_handoff() 로 획득한 model_path 가 사용 가능한 경로 객체이다."""
     save_handoff(step_n=1, save_dir=tmp_path)
     result = load_handoff(step_n=1, save_dir=tmp_path)
-    # model=None 이면 model_path=None (다음 step 초기화 불가 → 호출자가 체크)
     assert result.model_path is None or isinstance(result.model_path, Path)
 
 
 def test_handoff_step_numbering(tmp_path: Path) -> None:
-    """step_n=6 핸드오프 파일명이 step6_ 접두사를 가진다."""
+    """step_n=6 핸드오프 파일명이 step6/ 서브폴더에 생성된다."""
     save_handoff(step_n=6, save_dir=tmp_path)
-    assert (tmp_path / "step6_regression_report.json").exists()
-    assert (tmp_path / "step6_wandb_run_url.txt").exists()
+    assert (tmp_path / "step6").is_dir()
+    assert (tmp_path / "step6" / "step6_regression_report.json").exists()
+    assert (tmp_path / "step6" / "step6_wandb_run_url.txt").exists()

@@ -1,6 +1,17 @@
 """핸드오프 패키지 저장/로드 — CLAUDE.md §13.1.
 
-핸드오프 패키지 구성:
+★ Step 별 폴더 분리 의무 (의사결정 25):
+  base_dir/
+    step1/          ← save_handoff(step_n=1, save_dir=base_dir) 가 자동 생성
+      best_model.zip
+      best_model_meta.json
+      step1_regression_report.json
+      step1_wandb_run_url.txt
+      ...
+    step2/          ← Step 2 진입 시 자동 생성
+      ...
+
+핸드오프 패키지 구성 (각 step{N}/ 디렉터리 내부):
   best_model.zip              sb3 모델 가중치 (MaskablePPO.save)
   best_model_meta.json        아키텍처 정의
   stepN_normalizer.json       정규화 파라미터 (VecNormalize)
@@ -14,7 +25,8 @@
   stepN_wandb_run_url.txt     wandb run URL
 
 전이학습 인터페이스:
-  load_policy_for_transfer() → dict with model_path for next Step init.
+  result = load_handoff(step_n=1, save_dir="handoff")
+  model = MaskablePPO.load(result.model_path)
 """
 
 from __future__ import annotations
@@ -133,6 +145,11 @@ def make_regression_report(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _step_dir(base_dir: Path, step_n: int) -> Path:
+    """Step 별 폴더 경로 반환. CLAUDE.md §13.1 의사결정 25."""
+    return base_dir / f"step{step_n}"
+
+
 def save_handoff(
     step_n: int,
     save_dir: Path | str,
@@ -152,7 +169,8 @@ def save_handoff(
     step_n :
         현재 Step 번호.
     save_dir :
-        저장 디렉터리. 없으면 자동 생성.
+        핸드오프 base 디렉터리 (예: "handoff/").
+        실제 저장 위치: save_dir/step{N}/ (의사결정 25, Step 별 폴더 분리).
     model :
         MaskablePPO 인스턴스 (None 이면 best_model.zip 생략).
     config :
@@ -166,42 +184,42 @@ def save_handoff(
 
     Returns
     -------
-    save_dir : Path — 저장된 디렉터리.
+    step_dir : Path — 실제 저장된 step{N} 디렉터리.
     """
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+    step_d = _step_dir(Path(save_dir), step_n)
+    step_d.mkdir(parents=True, exist_ok=True)
 
     # model weights
     if model is not None:
-        model_path = save_dir / _fname("model", step_n)
+        model_path = step_d / _fname("model", step_n)
         model.save(str(model_path.with_suffix("")))  # sb3 .save() 가 .zip 자동 추가
         logger.info("[handoff] model saved: %s", model_path)
 
     # best_model_meta.json
     if config is None:
         config = HandoffConfig(step_n=step_n)
-    _write_json(save_dir / _fname("model_meta", step_n), config.to_dict())
+    _write_json(step_d / _fname("model_meta", step_n), config.to_dict())
 
     # regression report
     if regression_report is None:
         regression_report = make_regression_report(step_n)
-    _write_json(save_dir / _fname("regression", step_n), regression_report)
+    _write_json(step_d / _fname("regression", step_n), regression_report)
 
     # wandb URL
-    wandb_path = save_dir / _fname("wandb_url", step_n)
+    wandb_path = step_d / _fname("wandb_url", step_n)
     wandb_path.write_text(wandb_url, encoding="utf-8")
     logger.info("[handoff] wandb_url saved: %s", wandb_path)
 
     # optional configs
     if env_config is not None:
-        _write_json(save_dir / _fname("env_config", step_n), env_config)
+        _write_json(step_d / _fname("env_config", step_n), env_config)
     if reward_config is not None:
-        _write_json(save_dir / _fname("reward_config", step_n), reward_config)
+        _write_json(step_d / _fname("reward_config", step_n), reward_config)
     if kpi_report is not None:
-        _write_json(save_dir / _fname("kpi_report", step_n), kpi_report)
+        _write_json(step_d / _fname("kpi_report", step_n), kpi_report)
 
-    logger.info("[handoff] step %d handoff saved to %s", step_n, save_dir)
-    return save_dir
+    logger.info("[handoff] step %d handoff saved to %s", step_n, step_d)
+    return step_d
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,40 +245,43 @@ class HandoffResult:
 def load_handoff(step_n: int, save_dir: Path | str) -> HandoffResult:
     """CLAUDE.md §12.2 전이학습용 핸드오프 패키지 로드.
 
+    save_dir 은 base 디렉터리 (예: "handoff/"). 실제 탐색 위치: save_dir/step{N}/.
+    의사결정 25: Step 별 폴더 분리 보장.
+
     다음 Step 초기화 시:
-        result = load_handoff(step_n=1, save_dir="handoff/step1")
+        result = load_handoff(step_n=1, save_dir="handoff")
         model = MaskablePPO.load(result.model_path)
     """
-    save_dir = Path(save_dir)
-    if not save_dir.exists():
-        raise FileNotFoundError(f"handoff directory not found: {save_dir}")
+    step_d = _step_dir(Path(save_dir), step_n)
+    if not step_d.exists():
+        raise FileNotFoundError(f"handoff directory not found: {step_d}")
 
     # model_meta (필수)
-    meta_path = save_dir / _fname("model_meta", step_n)
+    meta_path = step_d / _fname("model_meta", step_n)
     if not meta_path.exists():
         raise FileNotFoundError(f"model_meta not found: {meta_path}")
     config = HandoffConfig.from_dict(_read_json(meta_path))
 
     # regression report (필수)
-    reg_path = save_dir / _fname("regression", step_n)
+    reg_path = step_d / _fname("regression", step_n)
     regression_report: dict = _read_json(reg_path) if reg_path.exists() else {}
 
     # wandb URL (선택)
-    url_path = save_dir / _fname("wandb_url", step_n)
+    url_path = step_d / _fname("wandb_url", step_n)
     wandb_url = url_path.read_text(encoding="utf-8").strip() if url_path.exists() else ""
 
     # model zip (선택)
-    model_path_candidate = save_dir / _fname("model", step_n)
+    model_path_candidate = step_d / _fname("model", step_n)
     model_path = model_path_candidate if model_path_candidate.exists() else None
 
     # optional configs
-    env_cfg_path = save_dir / _fname("env_config", step_n)
-    rwd_cfg_path = save_dir / _fname("reward_config", step_n)
-    kpi_cfg_path = save_dir / _fname("kpi_report", step_n)
+    env_cfg_path = step_d / _fname("env_config", step_n)
+    rwd_cfg_path = step_d / _fname("reward_config", step_n)
+    kpi_cfg_path = step_d / _fname("kpi_report", step_n)
 
     return HandoffResult(
         step_n=step_n,
-        save_dir=save_dir,
+        save_dir=step_d,
         config=config,
         regression_report=regression_report,
         wandb_url=wandb_url,

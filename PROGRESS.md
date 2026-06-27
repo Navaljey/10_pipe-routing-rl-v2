@@ -2025,13 +2025,56 @@ SKILL 갱신 순서 (절대 준수):
 | 2026-06-25 | 의사결정 22 신규 | PBS state-only 검증 강화 — closure 경고 + unit test 클로저 케이스 추가 | Session 2026-06-25 |
 | 2026-06-25 | 의사결정 23 신규 | skill 시스템 충돌 해결 — Option A-1 (in-place 갱신) 채택, 로컬 SKILL.md = source of truth | Session 2026-06-25 |
 | 2026-06-25 | 의사결정 24 신규 | 졸업 범위 확장 — 체크리스트 v2 (서버 skill 동기화 + CLI 검증 항목 추가) | Session 2026-06-25 |
+| 2026-06-28 | 의사결정 25 신규 | Step 별 핸드오프 폴더 분리 의무 — `base_dir/step{N}/` 자동 생성 | Session 2026-06-28 |
 
 > Lock **해제** 가 아니라 상위 **의사결정 재검토** 결과임에 유의. L-B1, L-B2, L-B3, L-B4, L-12.2, L-17.1은 "해제"가 아니라 "Hierarchical 폐기 부수효과로 항목 자체 폐기". 2026-06-18 의사결정 14, 16, 17, 18, 19, 20 은 진짜 Lock 해제.
 
 ---
 
-**문서 버전:** v1.1
+## Session 2026-06-28 — Step 별 핸드오프 폴더 분리 (의사결정 25)
+
+### 배경
+
+Stage 4 (regression callback + handoff) 완료 직후, `save_handoff()` 가 모든 파일을 `save_dir/` 에 직접 저장하는 구조에서 구조적 모호를 발견:
+- `best_model_meta.json` 이 step prefix 없이 저장됨 → Step 2 저장 시 Step 1 meta 덮어씀
+- `stepN_*` 파일이 같은 폴더에 누적 → Step 간 자산 독립성 없음
+- 회귀 재현 시 "어느 Step 의 자산인지" 폴더 구조로 명확히 해야 함
+
+### 핵심 의사결정 25 — Step 별 폴더 분리
+
+#### 결정 내용
+
+```
+save_handoff(step_n=N, save_dir=base_dir) → base_dir/step{N}/ 자동 생성
+load_handoff(step_n=N, save_dir=base_dir) → base_dir/step{N}/ 탐색
+
+base_dir/
+  step1/   ← Step 1 완료 시 생성. 이후 불변.
+  step2/   ← Step 2 완료 시 생성. step1/ 자산 영향 없음.
+  ...
+```
+
+#### 채택 근거
+
+- **자산 독립성**: Step N+1 저장이 Step N 자산을 덮어쓰지 않음. 회귀 검증 시 과거 자산 보존.
+- **회귀 재현성**: `load_handoff(step_n=1, ...)` 가 Step 1 완료 시점의 자산만 로드.
+- **전이학습 명시성**: `MaskablePPO.load(result.model_path)` 에서 어느 Step 자산인지 폴더 경로로 자명.
+
+#### 기각된 대안
+
+- **flat 구조 유지 + step prefix 강화**: `best_model_meta.json` → `step1_best_model_meta.json`. 파일명 충돌은 해결하지만 폴더 단위 자산 격리는 없음. 회귀 재현 시 Step 별 스냅샷 복구가 어렵다.
+- **zip 아카이브**: Step 완료 시 zip 으로 묶기. 전이학습 entry point 에서 경로 복잡도 증가.
+
+#### 코드 반영
+
+- `training/handoff.py`: `_step_dir()` 헬퍼 추가. `save_handoff()` → `step_d = base_dir/step{N}`. `load_handoff()` → `step_d = base_dir/step{N}`.
+- `tests/test_handoff.py`: 27개 테스트로 재작성. 폴더 분리 의무 3개 테스트 추가 (`test_save_handoff_creates_step_subfolder`, `test_save_handoff_step2_separate_folder`, `test_save_handoff_all_files_inside_step_dir`).
+- `CLAUDE.md §13.1`: Step 별 폴더 분리 의무 단락 + 폴더 트리 예시 추가.
+
+---
+
+**문서 버전:** v1.2
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-25 (Session 2026-06-25 추가: 의사결정 22/23/24 — skill 충돌 + PBS 검증 강화)
-**이전 갱신:** 2026-06-24 v1.0 (의사결정 21 \_ing 졸업), 2026-06-18 v0.6 (의사결정 18/19/20), 2026-06-18 v0.5 (의사결정 17), 2026-06-11, 2026-05-14, 2026-04-30 (프로젝트 시작)
-**다음 갱신 시점:** Phase 1 결과 분석 후 의사결정 25 (L-A3' 해제 등)
+**마지막 갱신:** 2026-06-28 (Session 2026-06-28 추가: 의사결정 25 — Step 별 핸드오프 폴더 분리)
+**이전 갱신:** 2026-06-25 v1.1 (의사결정 22/23/24), 2026-06-24 v1.0 (의사결정 21 \_ing 졸업), 2026-06-18 v0.6 (의사결정 18/19/20), 2026-06-18 v0.5 (의사결정 17), 2026-06-11, 2026-05-14, 2026-04-30 (프로젝트 시작)
+**다음 갱신 시점:** Phase 1 결과 분석 후 (L-A3' 해제 등)

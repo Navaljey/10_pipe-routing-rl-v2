@@ -986,14 +986,37 @@ goal_dir_idx  = rng.choice([i for i in range(6)
 
 ### 13.1 Step 핸드오프 (Step N → N+1, N ∈ [1,9])
 
+> **★ Step 별 폴더 분리 의무 (의사결정 25, 2026-06-28):**
+> 모든 핸드오프 파일은 `base_dir/step{N}/` 하위에 저장된다.
+> `save_handoff(step_n=N, save_dir=base_dir)` → `base_dir/step{N}/` 자동 생성.
+> Step 1 → 2 전이 시: `load_handoff(step_n=1, save_dir=base_dir)` → `base_dir/step1/` 탐색.
+> **Step 간 자산 독립성 보장: Step 2 저장이 Step 1 자산을 덮어쓰지 않는다.**
+
+```
+base_dir/
+  step1/                  ← Step 1 학습 완료 후 생성
+    best_model.zip
+    best_model_meta.json
+    step1_regression_report.json
+    step1_wandb_run_url.txt
+    step1_env_config.json
+    step1_reward_config.json
+    step1_kpi_report.json
+    step1_normalizer.json       (VecNormalize 저장 시)
+    step1_action_space_map.json
+    step1_training_log.csv
+    step1_validation_set.json
+  step2/                  ← Step 2 학습 완료 후 생성
+    ...
+```
+
 전 Step 공통 핸드오프 (단일 에이전트 구조이므로 Step 6→7도 동일):
 
 | 파일명 | 역할 |
 |-------|------|
-| `best_model.pt` | 단일 에이전트 가중치 |
-| `best_model_meta.json` | 아키텍처 정의 |
-| `stepN_normalizer.json` | 정규화 파라미터 |
-| `stepN_task_embedding.pt` | 테스크 임베딩 |
+| `best_model.zip` | 단일 에이전트 가중치 (MaskablePPO.save) |
+| `best_model_meta.json` | 아키텍처 정의 (HandoffConfig) |
+| `stepN_normalizer.json` | 정규화 파라미터 (VecNormalize) |
 | `stepN_kpi_report.json` | 평가 metric 결과 (Step 1~3: A* 비교, Step 4~6: Layer 1/2, Step 7~10: 다중 파이프) |
 | `stepN_training_log.csv` | 학습 이력 |
 | `stepN_action_space_map.json` | 행동 공간 |
