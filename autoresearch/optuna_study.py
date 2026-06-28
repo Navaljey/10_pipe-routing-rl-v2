@@ -112,8 +112,8 @@ def enqueue_round2_grid(study: optuna.Study) -> None:
       w3 ∈ {20, 50, 100}            → 3 values
       → 4 × 3 × 3 = 36 variants (α, β는 Round 1 best 고정)
 
-    Note: spec §16.3.2 는 "4 × 3 × 3 = 27" 로 기록되어 있으나 오타.
-    올바른 값은 36. 테스트 주석 및 CLAUDE.md §16.3.2 오타 수정 필요.
+    Note: 구 spec §16.3.2 는 "4 × 3 × 3 = 27" 로 기록되어 있었으나 오타.
+    올바른 값은 36. 의사결정 27 로 모든 관련 파일 수정 완료.
     """
     w1_values = [0.05, 0.1, 0.2, 0.5]
     w2_values = [1.0, 2.0, 5.0]
@@ -138,7 +138,7 @@ def enqueue_round2_grid(study: optuna.Study) -> None:
                     study.enqueue_trial({"w1": w1, "w2": w2, "w3": w3})
                     queued += 1
 
-    logger.info("[optuna] enqueued %d / 27 Round 2 grid trials", queued)
+    logger.info("[optuna] enqueued %d / 36 Round 2 grid trials", queued)
 
 
 def get_param_importances(study: optuna.Study) -> dict[str, float]:

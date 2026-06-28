@@ -214,6 +214,97 @@ Episode length 분포를 먼저 측정하고 reward scale 결정해야 함.
 
 > 본 entry는 placeholder 가 아닌 실제 실패 기록. 본 문서가 active learning resource 로 전환되는 시점.
 
+### 2026-06-28 — CLAUDE.md §16.3.2 sweep 산술 오류 (4×3×3=27 → 실제 36)
+
+**상황:**
+Sub-단계 5.2.a (autoresearch 인프라 구현 — Optuna + wandb + Stage runner) 중,
+`autoresearch/optuna_study.py` 의 `enqueue_round2_grid()` 테스트 작성 과정에서 발견.
+Round 2 sweep 범위 표기 검증 중 spec 과 실제 산술의 불일치 확인.
+
+**증상:**
+CLAUDE.md §16.3.2 (L-16.3-w 해제 결과, 의사결정 19) 의 sweep 범위:
+- 표기: `4 × 3 × 3 = 27 variants`
+- 실제: 4 × 3 × 3 = **36** variants (산술 오류)
+
+동일 오류가 여러 파일에 전파됨 (§16.3.2 외에 §16.5, §16.6.7, §99 Lock 해제 로그, SKILL.md §3.9, §4.9, PROGRESS.md 3개 위치, autoresearch/optuna_study.py 로그 메시지).
+
+**원인 분석:**
+
+[원인 1. 의사결정 작성 시 산술 미검증]
+의사결정 19 (L-16.3-w 해제, 2026-06-18, Session 2026-06-18) 작성 시
+Claude AI 세션에서 `4 × 3 × 3 = 27` 로 직접 계산 오류 기록.
+산술 표기가 있을 때 별도 검증 단계가 없었음.
+
+[원인 2. 사용자 confirm 의 한계]
+사용자 confirm 은 큰 결정 방향에 대한 동의. 모든 세부 산술 검증 아님.
+`4 × 3 × 3 = ?` 를 사용자가 암산 검증했을 것이라는 암묵적 가정이 있었음.
+
+[원인 3. \_ing 졸업 시점 (2026-06-24) 검증 미포함]
+졸업 체크리스트 (의사결정 21/24) 에 "기존 spec 의 산술 표기 일관성 검증" 항목 없었음.
+
+[원인 4. 오류가 여러 파일에 복사 전파]
+의사결정 19 결론 → CLAUDE.md §16.3.2 → SKILL.md §3.9/§4.9 → PROGRESS.md 여러 위치 → autoresearch 코드 주석까지 동일 오류 전파. 단일 오류 포인트에서 다중 파일 오염.
+
+[원인 5. implementation 단계 이전에는 발견 경로 없었음]
+spec 단계에서는 "27 개를 학습한다" 는 계획 수준이라 오류가 가시적이지 않음.
+코드에서 실제 루프를 돌리는 순간 (`4×3×3 = 36` 루프 결과) 에 비로소 발견됨.
+
+**해결책:**
+
+1. CLAUDE.md §16.3.2: `27 variants` → `36 variants` (수정 완료)
+2. CLAUDE.md §16.5 (16.5.C 변형 제안 메커니즘): `12~27` → `12~36` (수정 완료)
+3. CLAUDE.md §16.6.7 Round 2: `27 variants`, Stage 1 `하위 14 제거`, Stage 2 `13` → `36 variants`, `하위 18 제거`, `18` (수정 완료)
+4. CLAUDE.md §99 L-16.3-w 해제 로그: `27 variants` → `36 variants` (수정 완료)
+5. SKILL.md §3.9 Round 2: `→ 27 variants` → `→ 36 variants` + 의사결정 27 footnote (수정 완료)
+6. SKILL.md §4.9 Round 2: `27 variants`, Stage 1/2 수 갱신 (수정 완료)
+7. PROGRESS.md 3개 위치: 모두 `36` 으로 수정 완료
+8. autoresearch/optuna_study.py 로그 메시지 + docstring 주석 갱신 (수정 완료)
+9. tests/test_optuna_study.py 독스트링 갱신 (수정 완료)
+
+wall-clock 시간 재산정:
+  Stage 1: 250K × 36 = 9M timestep (T4 동시 3개 기준 약 12.5 시간)
+  구 산정: 250K × 27 = 6.75M timestep (약 9.4 시간)
+
+**교훈 (5가지):**
+
+1. **산술은 spec 작성 단계에서 별도 검증 필요**:
+   `4 × 3 × 3` 같은 단순 산술도 작성자가 잘못 계산 가능.
+   spec 안에 산술 표기가 있으면 작성 시 **즉시 계산기 또는 Python 으로 검증** 의무.
+   향후 spec 변경 시 산술 표기는 별도 확인 단계 거침.
+
+2. **두 세션 (Claude AI 세션 + Claude Code CLI) 역할 분리가 의도대로 작동**:
+   Claude AI 세션 (spec 결정) 에서 산술 오류 → Claude Code CLI (implementation) 가 발견.
+   implementation 단계가 spec 의 품질 보증 역할을 수행 — 본 \_ing 시스템 설계의 정상 작동.
+
+3. **사용자 confirm 의 한계를 가정하지 않음**:
+   confirm 은 "방향 동의" 이지 "세부 검증" 아님.
+   spec 작성자 (Claude) 의 self-check 가 사용자 검증보다 먼저여야 함.
+   "사용자가 확인했으니 맞겠지" 는 논리적 오류.
+
+4. **implementation 단계가 spec 의 가장 강력한 검증 도구**:
+   추상적 계획 수준에서는 `27` 이나 `36` 이나 똑같아 보임.
+   코드에서 실제 루프를 돌리는 순간 숫자가 강제 검증됨.
+   테스트 코드 작성 = spec 검증의 또 다른 이름.
+
+5. **단순 오류도 archive 가치 있음**:
+   `4 × 3 × 3 = 27` 같은 "단순한 오류" 일수록 향후 반복될 위험.
+   패턴: 행렬 크기 계산, 조합 수 계산, 비율 계산 등 spec 내 산술 전반에 동일 위험.
+   archive 화로 향후 spec 작성 시 산술 표기에 주의 기울이는 습관 형성.
+
+**관련 파일/위치:**
+- CLAUDE.md §16.3.2 (수정 완료) — sweep 범위 27 → 36
+- CLAUDE.md §16.5, §16.6.7, §99 (수정 완료) — 연관 위치
+- SKILL.md §3.9, §4.9 (수정 완료)
+- PROGRESS.md (수정 완료 — 3개 위치)
+- autoresearch/optuna_study.py (수정 완료)
+- tests/test_optuna_study.py (수정 완료)
+
+**관련 의사결정:**
+- 의사결정 19 (2026-06-18) — L-16.3-w 해제 — 산술 오류 포함 원본
+- 의사결정 27 신규 (2026-06-28) — 산술 오류 수정 + archive
+
+---
+
 ### 2026-06-25 — CLI 자동 로드 skill 과 졸업판 spec 충돌 (120-dim vs 150-dim / 27-action vs 7-direction)
 
 **상황:**
@@ -473,9 +564,9 @@ Autoresearch 결과:
 
 ---
 
-**문서 버전:** v1.1 (🎓 졸업판, entry 3개)
+**문서 버전:** v1.2 (🎓 졸업판, entry 4개)
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-25 (2026-06-25 entry 추가 — skill 충돌 사례. 의사결정 22/23/24)
-**이전 갱신:** 2026-06-24 (졸업판 동기화), 2026-06-18 (§0.1 dynamic source 역할), 2026-06-11 (2026-06-11 entry), 2026-05-14 (첫 entry)
-**최신 entry:** 2026-06-25 — CLI 자동 로드 skill 과 졸업판 spec 충돌 (120-dim vs 150-dim / 27-action vs 7-direction)
+**마지막 갱신:** 2026-06-28 (2026-06-28 entry 추가 — §16.3.2 산술 오류 archive. 의사결정 27)
+**이전 갱신:** 2026-06-25 (의사결정 22/23/24), 2026-06-24 (졸업판 동기화), 2026-06-18 (§0.1 dynamic source 역할), 2026-06-11 (entry), 2026-05-14 (첫 entry)
+**최신 entry:** 2026-06-28 — CLAUDE.md §16.3.2 sweep 산술 오류 (4×3×3=27 → 실제 36)
 **첫 entry:** 2026-05-14 — Phase 1 비효율 경로 + Hierarchical 가설 오진단

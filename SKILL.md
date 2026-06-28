@@ -366,7 +366,7 @@ CLAUDE.md §16.3.1 참조. SKILL 에서는 운영 규칙만 명시:
 
 [Step 1 autoresearch sweep — Round 2]
   w1 ∈ {0.05, 0.1, 0.2, 0.5} × w2 ∈ {1, 2, 5} × w3 ∈ {20, 50, 100}
-  → 27 variants
+  → 36 variants  (4×3×3=36; 구 spec "27" 오타 수정 — 의사결정 27)
 
 [Step 2~6 가중치 (w6~w17)]
   Phase 1 후 각 Step 진입 직전 후행 결정.
@@ -560,9 +560,9 @@ Round 1: L-D2 α × β sweep (12 variants)
   Stage 1: 250K × 12 → 하위 6 제거 / Stage 2: 2M × 6 → best 1
   결과: best (α, β) 확정
 
-Round 2: L-16.3-w 가중치 sweep (27 variants)
+Round 2: L-16.3-w 가중치 sweep (36 variants)
   α, β = Round 1 best 고정
-  Stage 1: 250K × 27 → 하위 14 제거 / Stage 2: 2M × 13 → best 1
+  Stage 1: 250K × 36 → 하위 18 제거 (50%) / Stage 2: 2M × 18 → best 1
   결과: best (w1, w2, w3) 확정
 
 Round 3 (optional): hyperparameter (learning_rate, batch_size, ent_coef, gamma)

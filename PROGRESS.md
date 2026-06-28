@@ -1399,7 +1399,7 @@ Round 2 sweep (Round 1 의 α/β best 고정 후):
   w1 ∈ {0.05, 0.1, 0.2, 0.5}     # 4 values
   w2 ∈ {1.0, 2.0, 5.0}            # 3 values
   w3 ∈ {20, 50, 100}              # 3 values
-  → 4 × 3 × 3 = 27 variants
+  → 4 × 3 × 3 = 36 variants  (구 spec "27" 오타 수정 — 의사결정 27)
 ```
 
 ##### (4) Step 2~6 가중치 — 상대 스케일 원칙
@@ -1803,7 +1803,7 @@ PBS 4 대 조건 (state-only / terminal=0 / γΦ(s')-Φ(s) / γ_PBS == γ_PPO) �
 
 8. Phase 1 Round 1 실행 (L-D2 α × β 12 variants sweep)
 9. 결과 분석 (wandb / Optuna importance)
-10. Round 2 진행 (L-16.3-w 27 variants) 또는 spec 재논의
+10. Round 2 진행 (L-16.3-w 36 variants) 또는 spec 재논의
 ```
 
 #### 학습 진행 중 다시 Claude AI 세션으로 돌아오는 시점
@@ -2019,7 +2019,7 @@ SKILL 갱신 순서 (절대 준수):
 | 2026-06-18 | 의사결정 16 신규 | L-D1 해제 — 전이학습 A+B 혼합 + 회귀 감시 체계 구체화 | Session 2026-06-18 |
 | 2026-06-18 | 의사결정 17 신규 | L-D2 해제 — Dense Reward Φ Phase 1 spec 확정 (Φ_goal + Φ_cong, α=1.0/β=0.1, PBS 4대 조건, helper class) | Session 2026-06-18 |
 | 2026-06-18 | 의사결정 18 신규 | L-C2 해제 — autoresearch 메타 (1/8 + 50%, 동시 2~3개, Round 5 상한, Optuna TPE) | Session 2026-06-18 |
-| 2026-06-18 | 의사결정 19 신규 | L-16.3-w 해제 — baseline 가중치 (w1=0.1, w2=2.0, w3=50.0, sweep 27 variants) | Session 2026-06-18 |
+| 2026-06-18 | 의사결정 19 신규 | L-16.3-w 해제 — baseline 가중치 (w1=0.1, w2=2.0, w3=50.0, sweep 36 variants; 구 "27" 오타) | Session 2026-06-18 |
 | 2026-06-18 | 의사결정 20 신규 | L-A6 해제 — Generator v1.0.0 (Poisson disk + cuboid + rejection sampling) | Session 2026-06-18 |
 | 2026-06-24 | 의사결정 21 신규 | 🎓 \_ing 시스템 졸업 — CLAUDE_ing/SKILL_ing/PROGRESS_ing → CLAUDE/SKILL/PROGRESS. 차단 의미 전환. 문서 v1.0. | Session 2026-06-24 |
 | 2026-06-25 | 의사결정 22 신규 | PBS state-only 검증 강화 — closure 경고 + unit test 클로저 케이스 추가 | Session 2026-06-25 |
@@ -2027,6 +2027,7 @@ SKILL 갱신 순서 (절대 준수):
 | 2026-06-25 | 의사결정 24 신규 | 졸업 범위 확장 — 체크리스트 v2 (서버 skill 동기화 + CLI 검증 항목 추가) | Session 2026-06-25 |
 | 2026-06-28 | 의사결정 25 신규 | Step 별 핸드오프 폴더 분리 의무 — `base_dir/step{N}/` 자동 생성 | Session 2026-06-28 |
 | 2026-06-28 | 의사결정 26 신규 | Sub-단계 5.1 baseline 결과 archive — Phase 1 첫 실증 evidence 공식 기록 | Session 2026-06-28 |
+| 2026-06-28 | 의사결정 27 신규 | §16.3.2 산술 오류 수정 — `4×3×3=27` → `36`. 관련 파일 전수 갱신 + FAILURE_LOG entry | Session 2026-06-28 |
 
 > Lock **해제** 가 아니라 상위 **의사결정 재검토** 결과임에 유의. L-B1, L-B2, L-B3, L-B4, L-12.2, L-17.1은 "해제"가 아니라 "Hierarchical 폐기 부수효과로 항목 자체 폐기". 2026-06-18 의사결정 14, 16, 17, 18, 19, 20 은 진짜 Lock 해제.
 

@@ -7,7 +7,7 @@
   - load_if_exists=True: 동일 storage/name 재생성 시 기존 study 로드
   - importance analysis: 완료 trial 2+개 이후 dict 반환
   - Round 1 grid: α×β 12개 enqueue (§16.6.7)
-  - Round 2 grid: w1×w2×w3 27개 enqueue (§16.3.2)
+  - Round 2 grid: w1×w2×w3 36개 enqueue (§16.3.2; 구 "27" 오타 수정 — 의사결정 27)
 """
 
 from __future__ import annotations

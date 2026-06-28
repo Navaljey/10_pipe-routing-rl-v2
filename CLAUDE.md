@@ -1232,9 +1232,9 @@ Stage 2 (정상 학습):       2,000,000 timestep
 #### C. 변형 제안 메커니즘 (Optuna TPE + Claude API)
 
 ```
-1. Stage 1 (12~27 variants):
+1. Stage 1 (12~36 variants):
    Optuna 의 enqueue_trial() 로 grid 명시 등록 (sweep 보장)
-   예: α × β = 12 variants 또는 w1 × w2 × w3 = 27 variants
+   예: α × β = 12 variants 또는 w1 × w2 × w3 = 36 variants
 
 2. Stage 2 (살아남은 후보):
    TPE (Tree-structured Parzen Estimator) sampler 로 local search
@@ -1348,10 +1348,10 @@ Round 1: L-D2 α × β sweep (12 variants)
   Stage 2: 2M timestep × 6 → best 1 선택
   결과: best (α, β) 확정
 
-Round 2: L-16.3-w 가중치 sweep (27 variants)
+Round 2: L-16.3-w 가중치 sweep (36 variants)
   α, β 는 Round 1 best 고정
-  Stage 1: 250K timestep × 27 → 하위 14 제거 (50%)
-  Stage 2: 2M timestep × 13 → best 1 선택
+  Stage 1: 250K timestep × 36 → 하위 18 제거 (50%)
+  Stage 2: 2M timestep × 18 → best 1 선택
   결과: best (w1, w2, w3) 확정
 
 Round 3 (optional): hyperparameter sweep
@@ -1701,7 +1701,7 @@ Lock ID는 `L-{카테고리}{일련번호}` 또는 `L-{spec 섹션}-{tag}` 형�
 
 핵심 결정:
 - Step 1 초기값: w1=0.1, w2=2.0, w3=50.0, w4=5.0 (§12.4 고정), w5=15.0 (§12.4 고정)
-- Step 1 sweep: w1∈{0.05, 0.1, 0.2, 0.5} × w2∈{1, 2, 5} × w3∈{20, 50, 100} = 27 variants
+- Step 1 sweep: w1∈{0.05, 0.1, 0.2, 0.5} × w2∈{1, 2, 5} × w3∈{20, 50, 100} = 36 variants (구 spec "27" 오타 — 의사결정 27)
 - 운영 방식: Sequential sweep (Round 1 = α/β, Round 2 = w1/w2/w3)
 - Step 2~6 w: Phase 1 후 후행 결정. 상대 스케일 원칙 명시 (hard ~20 / soft ~0.5)
 - 구체 spec: §16.3.1 ~ §16.3.3 참조
@@ -1814,14 +1814,16 @@ Lock ID는 `L-{카테고리}{일련번호}` 또는 `L-{spec 섹션}-{tag}` 형�
 | 2026-06-25 | **졸업 체크리스트 v2** | 서버 skill 동기화 + CLI 검증 항목 추가. SKILL.md §0.5 (의사결정 24) |
 | 2026-06-28 | **핸드오프 폴더 분리** | `base_dir/step{N}/` 자동 생성. §13.1 보강 (의사결정 25) |
 | 2026-06-28 | **Phase 1 첫 실증** | Sub-단계 5.1 50K baseline: success_rate 94%, PBS ratio 0.631. §16.3.1/§16.7 검증 (의사결정 26) |
+| 2026-06-28 | **§16.3.2 산술 오류 수정** | `4×3×3=27` → `36` 오타 수정. 관련 파일 전수 갱신 + FAILURE_LOG entry (의사결정 27) |
 
 > Lock **해제** 가 아니라 상위 **의사결정 재검토** 결과임에 유의.
 
 ---
 
-**문서 버전:** v1.2
+**문서 버전:** v1.3
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-28 (§101 의사결정 25/26 추가: 핸드오프 폴더 분리 + Phase 1 첫 실증)
+**마지막 갱신:** 2026-06-28 (§101 의사결정 27: §16.3.2 산술 오류 수정 + FAILURE_LOG entry)
+**이전 갱신:** 2026-06-28 v1.2 (§101 의사결정 25/26: 핸드오프 폴더 분리 + Phase 1 첫 실증)
 **이전 갱신:** 2026-06-25 v1.1 (§101 의사결정 22/23/24), 2026-06-24 v1.0 (\_ing 시스템 졸업), 2026-06-18 v0.6 (3개 Lock 추가 해제), 2026-06-18 v0.5 (L-A5/L-D1/L-D2 해제), 2026-06-11 (§99 Lock 명명 규칙), 2026-05-14 (Hierarchical 폐기)
 
 **졸업 후 spec 운영 원칙**:
