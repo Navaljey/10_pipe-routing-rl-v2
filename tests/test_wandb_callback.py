@@ -205,3 +205,128 @@ def test_init_wandb_run_smoke_disabled():
     )
     assert run is not None
     wandb.finish()
+
+
+# ─── 7. Stage/Round summary logging (disabled 모드) ─────────────────────────
+
+from autoresearch.wandb_callback import (
+    init_orchestrator_run,
+    log_stage1_summary,
+    log_stage2_summary,
+    log_round_summary,
+)
+from autoresearch.stage_runner import VariantResult
+
+
+def _make_variant(vid, metric, stage=1):
+    return VariantResult(variant_id=vid, params={"alpha": 1.0}, metric=metric,
+                         timesteps=100, stage=stage)
+
+
+def test_log_stage1_summary_noop_when_no_run():
+    """wandb.run=None 이면 log_stage1_summary 가 예외 없이 noop."""
+    import wandb
+    assert wandb.run is None
+    results = [_make_variant(i, 0.5 + i * 0.05) for i in range(4)]
+    survivors = results[:2]
+    log_stage1_summary(1, 1, results, survivors)   # 예외 없어야 함
+
+
+def test_log_stage2_summary_noop_when_no_run():
+    """wandb.run=None 이면 log_stage2_summary 가 예외 없이 noop."""
+    import wandb
+    assert wandb.run is None
+    results = [_make_variant(i, 0.6 + i * 0.05, stage=2) for i in range(2)]
+    log_stage2_summary(1, 1, results, results[0])
+
+
+def test_log_round_summary_noop_when_no_run():
+    """wandb.run=None 이면 log_round_summary 가 예외 없이 noop."""
+    import wandb
+    assert wandb.run is None
+    log_round_summary(1, {"alpha": 2.0, "beta": 0.1}, {"alpha": 0.7, "beta": 0.3})
+
+
+def test_init_orchestrator_run_disabled():
+    """init_orchestrator_run(mode='disabled') 가 예외 없이 run 반환."""
+    import wandb
+    run = init_orchestrator_run(step_n=1, round_n=1, mode="disabled")
+    assert run is not None
+    wandb.finish()
+
+
+def test_log_stage1_summary_with_active_run():
+    """활성 disabled run 에서 log_stage1_summary 예외 없이 실행."""
+    import wandb
+    run = init_orchestrator_run(step_n=1, round_n=1, mode="disabled")
+    results = [_make_variant(i, 0.5 + i * 0.1) for i in range(6)]
+    survivors = results[:3]
+    log_stage1_summary(1, 1, results, survivors)   # 예외 없어야 함
+    wandb.finish()
+
+
+def test_log_stage2_summary_with_active_run():
+    """활성 disabled run 에서 log_stage2_summary 예외 없이 실행."""
+    import wandb
+    run = init_orchestrator_run(step_n=1, round_n=1, mode="disabled")
+    results = [_make_variant(i, 0.7 + i * 0.05, stage=2) for i in range(3)]
+    best = results[0]
+    log_stage2_summary(1, 1, results, best)
+    wandb.finish()
+
+
+def test_on_stage1_callback_called_in_stage_runner():
+    """StageRunner.on_stage1_complete 콜백이 Stage 1 완료 시 호출된다."""
+    from autoresearch.stage_runner import StageRunner
+
+    called_with = []
+
+    def cb(all_results, survivors):
+        called_with.append((len(all_results), len(survivors)))
+
+    runner = StageRunner(
+        train_fn=lambda p, t, v: 0.5 + v * 0.1,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        on_stage1_complete=cb,
+    )
+    runner.run_stage1([{"v": i} for i in range(4)])
+    assert len(called_with) == 1
+    assert called_with[0] == (4, 2)   # 4 → 상위 50% = 2 생존
+
+
+def test_on_stage2_callback_called_in_stage_runner():
+    """StageRunner.on_stage2_complete 콜백이 Stage 2 완료 시 호출된다."""
+    from autoresearch.stage_runner import StageRunner, VariantResult
+
+    called_with = []
+
+    def cb(all_results, best):
+        called_with.append(best.metric)
+
+    survivors = [VariantResult(i, {"v": i}, 0.6 + i * 0.1, 100, 1) for i in range(2)]
+    runner = StageRunner(
+        train_fn=lambda p, t, v: 0.8 + v * 0.05,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        on_stage2_complete=cb,
+    )
+    runner.run_stage2(survivors)
+    assert len(called_with) == 1
+
+
+def test_callback_exception_does_not_abort_stage():
+    """콜백이 예외를 던져도 Stage 결과 자체는 정상 반환된다."""
+    from autoresearch.stage_runner import StageRunner
+
+    def bad_cb(all_results, survivors):
+        raise RuntimeError("intentional callback error")
+
+    runner = StageRunner(
+        train_fn=lambda p, t, v: 0.5,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        on_stage1_complete=bad_cb,
+    )
+    survivors = runner.run_stage1([{"v": 0}, {"v": 1}])
+    assert len(survivors) >= 1   # 예외에도 결과 반환됨

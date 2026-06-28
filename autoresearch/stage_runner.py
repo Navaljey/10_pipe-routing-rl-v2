@@ -29,7 +29,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,12 @@ class StageRunner:
         내결함성 캐시 디렉터리. None=캐시 없음.
         세션 중단 시 완료된 variant 결과를 JSON으로 보존 → 재시작 시 재사용.
         파일명: {cache_dir}/stage{S}_var{V:03d}.json
+    on_stage1_complete :
+        Stage 1 완료 콜백. signature: (all_results, survivors) → None.
+        None=noop. RoundOrchestrator 가 wandb summary logging 에 사용.
+    on_stage2_complete :
+        Stage 2 완료 콜백. signature: (all_results, best) → None.
+        None=noop.
     """
 
     def __init__(
@@ -78,6 +84,8 @@ class StageRunner:
         stage2_timesteps: int = STAGE2_TIMESTEPS,
         stage1_keep_ratio: float = STAGE1_KEEP_RATIO,
         cache_dir: str | Path | None = None,
+        on_stage1_complete: Callable[[list[Any], list[Any]], None] | None = None,
+        on_stage2_complete: Callable[[list[Any], Any], None] | None = None,
     ) -> None:
         if max_workers > MAX_PARALLEL_WORKERS_SPEED:
             logger.warning(
@@ -91,6 +99,8 @@ class StageRunner:
         self.stage2_timesteps = stage2_timesteps
         self.stage1_keep_ratio = stage1_keep_ratio
         self.cache_dir: Path | None = Path(cache_dir) if cache_dir is not None else None
+        self.on_stage1_complete = on_stage1_complete
+        self.on_stage2_complete = on_stage2_complete
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             logger.info("[stage_runner] 내결함성 캐시 활성화: %s", self.cache_dir)
@@ -129,6 +139,12 @@ class StageRunner:
         for r in survivors:
             logger.debug("  [생존] var%03d params=%s metric=%.4f", r.variant_id, r.params, r.metric)
 
+        if self.on_stage1_complete is not None:
+            try:
+                self.on_stage1_complete(results_sorted, survivors)
+            except Exception as e:
+                logger.warning("[stage_runner] on_stage1_complete 콜백 실패: %s", e)
+
         return survivors
 
     def run_stage2(self, survivors: list[VariantResult]) -> VariantResult:
@@ -161,6 +177,13 @@ class StageRunner:
             "[stage_runner] Stage 2 완료: best var%03d metric=%.4f params=%s",
             best.variant_id, best.metric, best.params,
         )
+
+        if self.on_stage2_complete is not None:
+            try:
+                self.on_stage2_complete(results_sorted, best)
+            except Exception as e:
+                logger.warning("[stage_runner] on_stage2_complete 콜백 실패: %s", e)
+
         return best
 
     def run_full(self, variants: list[dict]) -> tuple[VariantResult, list[VariantResult]]:

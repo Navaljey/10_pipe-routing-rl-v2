@@ -43,6 +43,12 @@ from autoresearch.optuna_study import (
     get_param_importances,
 )
 from autoresearch.stage_runner import StageRunner, VariantResult, STAGE1_TIMESTEPS, STAGE2_TIMESTEPS
+from autoresearch.wandb_callback import (
+    init_orchestrator_run,
+    log_round_summary,
+    log_stage1_summary,
+    log_stage2_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +146,7 @@ class RoundOrchestrator:
         stage2_timesteps: int = STAGE2_TIMESTEPS,
         optuna_storage: str | None = "sqlite:///autoresearch.db",
         cache_dir: str | None = None,
+        wandb_mode: str = "disabled",
     ) -> None:
         self.train_fn = train_fn
         self.step_n = step_n
@@ -148,6 +155,7 @@ class RoundOrchestrator:
         self.stage2_timesteps = stage2_timesteps
         self.optuna_storage = optuna_storage
         self.cache_dir = cache_dir   # Colab 내결함성 캐시 (None=비활성)
+        self.wandb_mode = wandb_mode  # 'online'|'offline'|'disabled'. 기본 disabled (테스트/로컬)
         self.state = OrchestratorState()
 
     # ─── public API ─────────────────────────────────────────────────────────
@@ -282,18 +290,45 @@ class RoundOrchestrator:
         variants: list[dict],
         fixed_params: dict,
     ) -> RoundResult:
-        """Stage 1 → Stage 2 실행. best params + fixed_params 를 다음 Round 고정값으로 반환."""
+        """Stage 1 → Stage 2 실행. best params + fixed_params 를 다음 Round 고정값으로 반환.
+
+        오케스트레이터 wandb run (step{N}_round{R}_orch) 을 열고
+        Stage 1/2 집계 summary 를 기록한다.
+        wandb_mode='disabled' 이면 run 은 noop (테스트/로컬 환경).
+        """
+        import wandb as _wandb
+
+        orch_run = init_orchestrator_run(
+            step_n=self.step_n,
+            round_n=round_n,
+            mode=self.wandb_mode,
+        )
+
+        def _on_stage1(all_results, survivors):
+            log_stage1_summary(self.step_n, round_n, all_results, survivors)
+
+        def _on_stage2(all_results, best):
+            log_stage2_summary(self.step_n, round_n, all_results, best)
+
         runner = StageRunner(
             train_fn=self.train_fn,
             max_workers=self.max_workers,
             stage1_timesteps=self.stage1_timesteps,
             stage2_timesteps=self.stage2_timesteps,
             cache_dir=self.cache_dir,
+            on_stage1_complete=_on_stage1,
+            on_stage2_complete=_on_stage2,
         )
         best, _ = runner.run_full(variants)
 
         # 다음 Round 고정값 = 현재 Round 고정값 + best params
         next_fixed = {**fixed_params, **best.params}
+
+        # Round 종료 summary (importances 는 호출자가 채운 후 별도 log 가능)
+        log_round_summary(round_n, next_fixed, importances={})
+
+        orch_run.finish()
+        logger.info("[orchestrator] wandb orch run 종료: step%d_round%d_orch", self.step_n, round_n)
 
         return RoundResult(
             round_n=round_n,
