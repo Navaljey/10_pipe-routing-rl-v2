@@ -77,12 +77,13 @@ class OrchestratorState:
         return [r.best.metric for r in self.round_results]
 
     def is_plateau(self) -> bool:
-        """§16.6.B 조건 3: 최근 2 Round best metric 증가 < 2%p."""
+        """§16.6.B 조건 3: 최근 2 Round best metric 증가 < 2.0%p (부동소수점 epsilon 1e-6 허용)."""
         metrics = self.best_metrics
         if len(metrics) < STAGNATION_ROUNDS:
             return False
         improvement = metrics[-1] - metrics[-2]
-        if improvement < PLATEAU_THRESHOLD:
+        # 부동소수점 안전성: 0.02 정확히에서 오차로 잘못 감지하는 경우 방지
+        if improvement < (PLATEAU_THRESHOLD - 1e-9):
             logger.info(
                 "[orchestrator] plateau 감지: Round %d→%d improvement=%.4f < %.4f",
                 len(metrics) - 1, len(metrics), improvement, PLATEAU_THRESHOLD,

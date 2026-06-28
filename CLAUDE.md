@@ -1272,7 +1272,7 @@ Stage 2 (정상 학습):       2,000,000 timestep
 1. Round 5 도달 (절대 상한)
 2. 최근 2 Round 의 best 변형이 동일 (개선 정체)
 3. wandb best variant 학습 곡선 plateau 명확
-   기준: 마지막 200K timestep 의 success_rate 증가 < 2%p
+   기준: 마지막 200K timestep 의 success_rate 증가 < 2.0%p (부동소수점 epsilon 1e-6 허용)
 4. 사용자 강제 종료
 ```
 
