@@ -1154,7 +1154,7 @@ Stage 1 sweep (Round 2 — Round 1 의 α/β best 고정 후):
   w1 ∈ {0.05, 0.1, 0.2, 0.5}      # 4 values
   w2 ∈ {1.0, 2.0, 5.0}             # 3 values
   w3 ∈ {20, 50, 100}               # 3 values
-  → 4 × 3 × 3 = 27 variants
+  → 4 × 3 × 3 = 36 variants
 
 Stage 2: 살아남은 후보 ± 50% local grid
 ```

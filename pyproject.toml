@@ -144,6 +144,7 @@ markers = [
     "generator: Procedural Generator v1.0.0 (CLAUDE.md §11.0.8)",
     "regression: 회귀 감시 (CLAUDE.md §12.3)",
     "coord: 좌표계 변환 단위 테스트 (CLAUDE.md §9, L-C4)",
+    "sanity: 인프라 통합 sanity check (실제 학습 포함, 느림)",
 ]
 filterwarnings = [
     # SB3 의 gym → gymnasium 마이그레이션 경고 등은 무시
