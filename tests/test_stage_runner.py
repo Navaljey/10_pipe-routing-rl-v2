@@ -158,7 +158,101 @@ def test_run_full_pipeline_6_variants():
     assert best.metric >= max(s.metric for s in survivors) - 1e-9
 
 
-# ─── 4. max_workers 경고 ─────────────────────────────────────────────────────
+# ─── 4. 내결함성 캐시 (Colab 세션 중단 대비) ────────────────────────────────
+
+def test_cache_hit_skips_train_fn(tmp_path):
+    """캐시 파일이 있으면 train_fn 호출 없이 캐시 반환."""
+    call_count = [0]
+
+    def train_fn(params, timesteps, variant_id):
+        call_count[0] += 1
+        return 0.7
+
+    runner = StageRunner(
+        train_fn=train_fn,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    variants = [{"v": 0}]
+
+    # 첫 실행 → train_fn 호출 + 캐시 저장
+    runner.run_stage1(variants)
+    assert call_count[0] == 1
+
+    # 두 번째 실행 → 캐시 히트, train_fn 호출 없음
+    runner.run_stage1(variants)
+    assert call_count[0] == 1   # 여전히 1
+
+
+def test_cache_file_written_on_completion(tmp_path):
+    """variant 완료 시 캐시 JSON 파일 생성됨."""
+    runner = StageRunner(
+        train_fn=lambda p, t, v: 0.5,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    runner.run_stage1([{"v": 0}, {"v": 1}])
+    assert (tmp_path / "stage1_var000.json").exists()
+    assert (tmp_path / "stage1_var001.json").exists()
+
+
+def test_cache_miss_on_fresh_dir(tmp_path):
+    """캐시 파일 없으면 train_fn 정상 호출."""
+    call_count = [0]
+
+    def train_fn(params, timesteps, variant_id):
+        call_count[0] += 1
+        return 0.6
+
+    runner = StageRunner(
+        train_fn=train_fn,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path / "new_dir",  # 새 디렉터리
+    )
+    runner.run_stage1([{"v": 0}])
+    assert call_count[0] == 1
+
+
+def test_cache_none_means_no_caching():
+    """cache_dir=None 이면 캐시 없이 정상 동작."""
+    call_count = [0]
+
+    def train_fn(params, timesteps, variant_id):
+        call_count[0] += 1
+        return 0.5
+
+    runner = StageRunner(
+        train_fn=train_fn,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=None,
+    )
+    runner.run_stage1([{"v": 0}])
+    runner.run_stage1([{"v": 0}])   # 캐시 없으므로 2번 호출
+    assert call_count[0] == 2
+
+
+def test_cache_stage2_separate_from_stage1(tmp_path):
+    """Stage 1 과 Stage 2 캐시 파일이 별도로 저장됨."""
+    runner = StageRunner(
+        train_fn=lambda p, t, v: 0.8,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    variants = [{"v": 0}, {"v": 1}]
+    survivors = runner.run_stage1(variants)
+    runner.run_stage2(survivors)
+
+    # stage1_var000.json 과 stage2_var000.json 모두 존재
+    assert (tmp_path / "stage1_var000.json").exists()
+    assert (tmp_path / "stage2_var000.json").exists()
+
+
+# ─── 5. max_workers 경고 ─────────────────────────────────────────────────────
 
 def test_max_workers_over_limit_logs_warning(caplog):
     """max_workers > 3 시 WARNING 로그 발생. §16.5.B."""
@@ -184,7 +278,7 @@ def test_max_workers_within_limit_no_warning(caplog):
     assert "OOM" not in caplog.text
 
 
-# ─── 5. 실패 variant 처리 ────────────────────────────────────────────────────
+# ─── 6. 실패 variant 처리 ────────────────────────────────────────────────────
 
 def test_failed_variant_gets_neg_inf_metric():
     """train_fn 예외 → metric=-inf, Stage 1 에서 제거된다."""
@@ -208,7 +302,7 @@ def test_failed_variant_gets_neg_inf_metric():
     assert all(s.metric > float("-inf") for s in survivors)
 
 
-# ─── 6. 상수 값 spec 정합 ────────────────────────────────────────────────────
+# ─── 7. 상수 값 spec 정합 ────────────────────────────────────────────────────
 
 def test_stage1_timesteps_constant():
     """STAGE1_TIMESTEPS == 250,000. §16.5.B."""

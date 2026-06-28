@@ -24,9 +24,11 @@ train_fn 인터페이스:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Callable, NamedTuple
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ logger = logging.getLogger(__name__)
 STAGE1_TIMESTEPS: int = 250_000
 STAGE2_TIMESTEPS: int = 2_000_000
 STAGE1_KEEP_RATIO: float = 0.5        # 하위 50% 제거 (successive halving 표준)
-MAX_PARALLEL_WORKERS_SAFE: int = 2     # T4 GPU 1개 기준 안전
+MAX_PARALLEL_WORKERS_SAFE: int = 2     # T4 GPU 1개 기준 안전 (무료 Colab 기준)
 MAX_PARALLEL_WORKERS_SPEED: int = 3   # T4 GPU 1개 기준 속도 우선
 
 
@@ -57,11 +59,15 @@ class StageRunner:
         (params, timesteps, variant_id) → float (metric, 높을수록 좋음)
     max_workers :
         동시 학습 worker 수. 1=sequential.
-        T4 GPU 기준 2(안전) 또는 3(속도 우선). §16.5.B.
+        무료 Colab T4 기준 2(안전). §16.5.B.
     stage1_timesteps, stage2_timesteps :
         스펙 고정값. 테스트 시 오버라이드 가능 (sanity check 용).
     stage1_keep_ratio :
         Stage 1 생존 비율. 0.5 = 하위 50% 제거. §16.5.B.
+    cache_dir :
+        내결함성 캐시 디렉터리. None=캐시 없음.
+        세션 중단 시 완료된 variant 결과를 JSON으로 보존 → 재시작 시 재사용.
+        파일명: {cache_dir}/stage{S}_var{V:03d}.json
     """
 
     def __init__(
@@ -71,6 +77,7 @@ class StageRunner:
         stage1_timesteps: int = STAGE1_TIMESTEPS,
         stage2_timesteps: int = STAGE2_TIMESTEPS,
         stage1_keep_ratio: float = STAGE1_KEEP_RATIO,
+        cache_dir: str | Path | None = None,
     ) -> None:
         if max_workers > MAX_PARALLEL_WORKERS_SPEED:
             logger.warning(
@@ -83,6 +90,10 @@ class StageRunner:
         self.stage1_timesteps = stage1_timesteps
         self.stage2_timesteps = stage2_timesteps
         self.stage1_keep_ratio = stage1_keep_ratio
+        self.cache_dir: Path | None = Path(cache_dir) if cache_dir is not None else None
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("[stage_runner] 내결함성 캐시 활성화: %s", self.cache_dir)
 
     # ─── public API ─────────────────────────────────────────────────────────
 
@@ -203,16 +214,51 @@ class StageRunner:
                     ))
         return results
 
+    def _cache_path(self, stage: int, variant_id: int) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / f"stage{stage}_var{variant_id:03d}.json"
+
+    def _load_cached(self, stage: int, variant_id: int) -> VariantResult | None:
+        path = self._cache_path(stage, variant_id)
+        if path is None or not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            result = VariantResult(**data)
+            logger.info("[stage_runner] var%03d stage%d 캐시 히트 (metric=%.4f) — 재학습 생략",
+                        variant_id, stage, result.metric)
+            return result
+        except Exception as e:
+            logger.warning("[stage_runner] var%03d 캐시 로드 실패 (%s) — 재학습", variant_id, e)
+            return None
+
+    def _save_cached(self, result: VariantResult) -> None:
+        path = self._cache_path(result.stage, result.variant_id)
+        if path is None:
+            return
+        try:
+            path.write_text(json.dumps(result._asdict()), encoding="utf-8")
+        except Exception as e:
+            logger.warning("[stage_runner] var%03d 캐시 저장 실패: %s", result.variant_id, e)
+
     def _run_one(
         self, variant_id: int, params: dict, timesteps: int, stage: int
     ) -> VariantResult:
+        # 캐시 히트 시 재학습 생략 (Colab 세션 중단 내결함성)
+        cached = self._load_cached(stage, variant_id)
+        if cached is not None:
+            return cached
+
         logger.debug("[stage_runner] var%03d 시작 stage=%d timesteps=%d", variant_id, timesteps, stage)
         metric = self.train_fn(params, timesteps, variant_id)
         logger.debug("[stage_runner] var%03d 완료 metric=%.4f", variant_id, metric)
-        return VariantResult(
+        result = VariantResult(
             variant_id=variant_id,
             params=params,
             metric=metric,
             timesteps=timesteps,
             stage=stage,
         )
+        self._save_cached(result)
+        return result

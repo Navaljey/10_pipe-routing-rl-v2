@@ -138,6 +138,7 @@ class RoundOrchestrator:
         stage1_timesteps: int = STAGE1_TIMESTEPS,
         stage2_timesteps: int = STAGE2_TIMESTEPS,
         optuna_storage: str | None = "sqlite:///autoresearch.db",
+        cache_dir: str | None = None,
     ) -> None:
         self.train_fn = train_fn
         self.step_n = step_n
@@ -145,6 +146,7 @@ class RoundOrchestrator:
         self.stage1_timesteps = stage1_timesteps
         self.stage2_timesteps = stage2_timesteps
         self.optuna_storage = optuna_storage
+        self.cache_dir = cache_dir   # Colab 내결함성 캐시 (None=비활성)
         self.state = OrchestratorState()
 
     # ─── public API ─────────────────────────────────────────────────────────
@@ -285,6 +287,7 @@ class RoundOrchestrator:
             max_workers=self.max_workers,
             stage1_timesteps=self.stage1_timesteps,
             stage2_timesteps=self.stage2_timesteps,
+            cache_dir=self.cache_dir,
         )
         best, _ = runner.run_full(variants)
 
