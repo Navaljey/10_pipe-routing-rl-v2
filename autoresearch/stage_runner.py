@@ -145,6 +145,9 @@ class StageRunner:
             except Exception as e:
                 logger.warning("[stage_runner] on_stage1_complete 콜백 실패: %s", e)
 
+        # Stage 1 survivors 자동 저장 — Stage 2 재개용 (취약점 보강)
+        self._save_survivors(survivors)
+
         return survivors
 
     def run_stage2(self, survivors: list[VariantResult]) -> VariantResult:
@@ -187,13 +190,26 @@ class StageRunner:
         return best
 
     def run_full(self, variants: list[dict]) -> tuple[VariantResult, list[VariantResult]]:
-        """Stage 1 + Stage 2 전체 실행.
+        """Stage 1 + Stage 2 전체 실행. Stage 1 완료 캐시가 있으면 Stage 1 생략.
+
+        재개 흐름 (세션 중단 후):
+          - cache_dir/stage1_survivors.json 존재 → Stage 1 스킵, Stage 2 바로 실행
+          - stage1_survivors.json 없음 → 정상 순서 (Stage 1 → Stage 2)
+          - Stage 2 개별 variant 캐시 (stage2_var{V}.json) 도 자동 재사용
 
         Returns
         -------
-        (best, all_stage2_results)
+        (best, survivors)
         """
-        survivors = self.run_stage1(variants)
+        survivors = self._load_survivors()
+        if survivors is not None:
+            logger.info(
+                "[stage_runner] Stage 1 survivors 캐시 히트 (%d개) — Stage 1 생략, Stage 2 바로 실행",
+                len(survivors),
+            )
+        else:
+            survivors = self.run_stage1(variants)
+
         best = self.run_stage2(survivors)
         return best, survivors
 
@@ -241,6 +257,35 @@ class StageRunner:
         if self.cache_dir is None:
             return None
         return self.cache_dir / f"stage{stage}_var{variant_id:03d}.json"
+
+    def _survivors_cache_path(self) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / "stage1_survivors.json"
+
+    def _save_survivors(self, survivors: list[VariantResult]) -> None:
+        """Stage 1 survivors 를 캐시에 자동 저장 (Stage 2 재개용)."""
+        path = self._survivors_cache_path()
+        if path is None:
+            return
+        try:
+            path.write_text(json.dumps([r._asdict() for r in survivors]), encoding="utf-8")
+            logger.info("[stage_runner] Stage 1 survivors 자동 저장: %s (%d개)", path, len(survivors))
+        except Exception as e:
+            logger.warning("[stage_runner] survivors 저장 실패: %s", e)
+
+    def _load_survivors(self) -> list[VariantResult] | None:
+        """Stage 1 survivors 캐시 로드. 없거나 손상되면 None."""
+        path = self._survivors_cache_path()
+        if path is None or not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            survivors = [VariantResult(**d) for d in data]
+            return survivors
+        except Exception as e:
+            logger.warning("[stage_runner] survivors 캐시 로드 실패 (%s) — Stage 1 재실행", e)
+            return None
 
     def _load_cached(self, stage: int, variant_id: int) -> VariantResult | None:
         path = self._cache_path(stage, variant_id)

@@ -252,6 +252,73 @@ def test_cache_stage2_separate_from_stage1(tmp_path):
     assert (tmp_path / "stage2_var000.json").exists()
 
 
+def test_survivors_auto_saved_after_stage1(tmp_path):
+    """Stage 1 완료 후 stage1_survivors.json 자동 저장."""
+    runner = StageRunner(
+        train_fn=lambda p, t, v: 0.5 + v * 0.1,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    runner.run_stage1([{"v": i} for i in range(4)])
+    assert (tmp_path / "stage1_survivors.json").exists()
+
+
+def test_run_full_resumes_from_survivors_cache(tmp_path):
+    """Stage 1 완료 후 세션 중단 → run_full 재호출 시 Stage 1 생략."""
+    call_count = [0]
+
+    def train_fn(params, timesteps, variant_id):
+        call_count[0] += 1
+        return 0.5 + variant_id * 0.1
+
+    runner = StageRunner(
+        train_fn=train_fn,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    variants = [{"v": i} for i in range(4)]
+
+    # 첫 실행: Stage 1 (4 calls) + Stage 2 (2 calls) = 6
+    runner.run_full(variants)
+    assert call_count[0] == 6
+
+    # 재시작 시뮬레이션: 새 runner, 같은 cache_dir
+    runner2 = StageRunner(
+        train_fn=train_fn,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    call_count[0] = 0
+    runner2.run_full(variants)
+    # Stage 1 생략 + Stage 2 도 캐시 히트 → 총 0 calls
+    assert call_count[0] == 0
+
+
+def test_survivors_cache_corrupted_falls_back_to_stage1(tmp_path):
+    """stage1_survivors.json 손상 시 Stage 1 재실행 (안전 폴백)."""
+    call_count = [0]
+
+    def train_fn(params, timesteps, variant_id):
+        call_count[0] += 1
+        return 0.5
+
+    # 손상된 survivors 파일 미리 작성
+    (tmp_path / "stage1_survivors.json").write_text("CORRUPTED JSON {{", encoding="utf-8")
+
+    runner = StageRunner(
+        train_fn=train_fn,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    runner.run_full([{"v": 0}, {"v": 1}])
+    # 손상 파일 무시 → Stage 1 재실행 → train_fn 호출됨
+    assert call_count[0] > 0
+
+
 # ─── 5. max_workers 경고 ─────────────────────────────────────────────────────
 
 def test_max_workers_over_limit_logs_warning(caplog):
