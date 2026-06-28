@@ -1,6 +1,12 @@
-"""autoresearch — Optuna + wandb + 2-Stage screening. CLAUDE.md §16.5~§16.6.7."""
+"""autoresearch — Optuna + wandb + 2-Stage screening + Round 운영. CLAUDE.md §16.5~§16.6.7."""
 
 from autoresearch.optuna_study import create_study, get_param_importances
+from autoresearch.round_orchestrator import (
+    MAX_ROUNDS,
+    PLATEAU_THRESHOLD,
+    RoundOrchestrator,
+    RoundResult,
+)
 from autoresearch.stage_runner import StageRunner, STAGE1_TIMESTEPS, STAGE2_TIMESTEPS
 from autoresearch.wandb_callback import (
     build_run_config,
@@ -13,6 +19,10 @@ from autoresearch.wandb_callback import (
 __all__ = [
     "create_study",
     "get_param_importances",
+    "RoundOrchestrator",
+    "RoundResult",
+    "MAX_ROUNDS",
+    "PLATEAU_THRESHOLD",
     "StageRunner",
     "STAGE1_TIMESTEPS",
     "STAGE2_TIMESTEPS",
