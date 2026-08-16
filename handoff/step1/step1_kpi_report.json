@@ -1,0 +1,9 @@
+{
+  "step": 1,
+  "timesteps": 50000,
+  "success_rate": 0.94,
+  "mean_episode_length": 16.88,
+  "pbs_ratio_mean": 0.6309277041274327,
+  "elapsed_sec": 466.05034828186035,
+  "note": "baseline sanity run"
+}

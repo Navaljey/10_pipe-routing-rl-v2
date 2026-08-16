@@ -1,0 +1,13 @@
+{
+  "step_n": 1,
+  "obs_dim": 150,
+  "hidden_dim": 256,
+  "n_actions": 7,
+  "gamma_ppo": 0.99,
+  "generator_version": "v1.0.0",
+  "alpha": 1.0,
+  "beta": 0.1,
+  "w1": 0.1,
+  "w2": 2.0,
+  "w3": 50.0
+}

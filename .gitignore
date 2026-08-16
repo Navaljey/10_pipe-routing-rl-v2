@@ -121,3 +121,13 @@ temp/
 .DS_Store
 .Trashes
 desktop.ini
+# 자동연구 캐시 (top-level cache/ 누락분)
+cache/
+
+# 핸드오프 산출물 (폴더명 단수 handoff/ 대응)
+handoff/**/*.zip
+handoff/**/*.pt
+handoff/**/*.pth
+
+# Claude Code 로컬 전용 설정 (기기별, 공유 안 함)
+.claude/settings.local.json

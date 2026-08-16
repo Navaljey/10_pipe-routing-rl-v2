@@ -1,0 +1,27 @@
+# Auto detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Python
+*.py text eol=lf
+*.pyi text eol=lf
+
+# Configuration
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+
+# Documentation
+*.md text eol=lf
+
+# Windows-specific (있다면)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary
+*.zip binary
+*.pkl binary
+*.npz binary
+*.db binary
+*.pt binary
+*.pth binary

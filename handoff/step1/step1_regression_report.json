@@ -1,0 +1,6 @@
+{
+  "step": 1,
+  "generator_version": "v1.0.0",
+  "note": "Phase 1 (Step 1): no previous steps to regress on. Regression callback inactive.",
+  "metrics_by_step": {}
+}
