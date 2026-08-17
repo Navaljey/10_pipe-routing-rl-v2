@@ -4,10 +4,11 @@
 
 ## 문서 읽는 순서
 
-1. **CLAUDE.md** — 프로젝트 spec 본체 (WHAT)
-2. **SKILL.md** — 구현 규칙 (HOW)
-3. **PROGRESS.md** — 의사결정 이력 (WHY)
-4. **FAILURE_LOG.md** — 실패 / 시행착오 archive
+1. **CLAUDE.md** — 프로젝트 spec 본체 (WHAT). 상시 로드 핵심(비전/아키텍처/전 Step 불변 규칙/작업 경로 원칙/활성 Lock)만 담고, 주제별 세부 spec은 `docs/`로 분리되어 있다.
+2. **docs/** — 주제별 세부 spec 참조 문서 (파이프 공학 스펙, 평가 체계, 전이학습/핸드오프, autoresearch 운영, 시각화/구동환경, 폐기 내역·Lock 이력). CLAUDE.md의 문서 지도에서 `@docs/파일명.md`로 연결됨.
+3. **SKILL.md** — 구현 규칙 (HOW)
+4. **PROGRESS.md** — 의사결정 이력 (WHY)
+5. **FAILURE_LOG.md** — 실패 / 시행착오 archive
 
 ## 현재 상태
 
