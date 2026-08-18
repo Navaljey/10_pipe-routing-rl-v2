@@ -229,12 +229,12 @@ class StageRunner:
         tasks = list(zip(variant_ids, variants))
 
         if self.max_workers <= 1:
-            return [self._run_one(vid, params, timesteps, stage) for vid, params in tasks]
+            return [self._run_one_safe(vid, params, timesteps, stage) for vid, params in tasks]
 
         results: list[VariantResult] = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {
-                pool.submit(self._run_one, vid, params, timesteps, stage): vid
+                pool.submit(self._run_one_safe, vid, params, timesteps, stage): vid
                 for vid, params in tasks
             }
             for future in as_completed(futures):
@@ -242,8 +242,12 @@ class StageRunner:
                 try:
                     results.append(future.result())
                 except Exception as e:
-                    logger.error("[stage_runner] var%03d 학습 실패: %s", vid, e)
-                    # 실패한 variant 는 metric=-inf 로 마킹 (Stage 1 에서 자동 제거됨)
+                    # 방어적 fallback: _run_one_safe 자체가 실패하는 극단적 경우
+                    # (예: pickling 오류 등 ThreadPoolExecutor 자체 문제)
+                    logger.error(
+                        "[stage_runner] var%03d 예상치 못한 실패 (safe wrapper 밖): %s",
+                        vid, e, exc_info=True,
+                    )
                     results.append(VariantResult(
                         variant_id=vid,
                         params=tasks[variant_ids.index(vid)][1],
@@ -252,6 +256,35 @@ class StageRunner:
                         stage=stage,
                     ))
         return results
+
+    def _run_one_safe(
+        self, variant_id: int, params: dict, timesteps: int, stage: int
+    ) -> VariantResult:
+        """_run_one() 을 예외로부터 보호하는 공통 wrapper — sequential/parallel 동일 경로.
+
+        train_fn 예외 시 전체 traceback 을 로그에 남기고 metric=-inf 로 마킹한다
+        (Stage 1 에서 자동 제거됨). 이전에는 parallel(max_workers>1) 경로에서만
+        이렇게 흡수하고 sequential 경로는 예외를 그대로 전파해 동작이 갈렸다.
+
+        의도적으로 실패 결과는 캐시에 저장하지 않는다 (_run_one() 내부의
+        _save_cached() 는 정상 반환 시에만 거친다). 원인을 고치고 재실행하면
+        다시 시도되어야 하므로 — 캐싱하면 버그를 고쳐도 오래된 -inf 가
+        재사용되어 수정이 반영 안 된 것처럼 보일 수 있다.
+        """
+        try:
+            return self._run_one(variant_id, params, timesteps, stage)
+        except Exception:
+            logger.error(
+                "[stage_runner] var%03d 학습 실패 (stage=%d) — metric=-inf 로 마킹",
+                variant_id, stage, exc_info=True,
+            )
+            return VariantResult(
+                variant_id=variant_id,
+                params=params,
+                metric=float("-inf"),
+                timesteps=timesteps,
+                stage=stage,
+            )
 
     def _cache_path(self, stage: int, variant_id: int) -> Path | None:
         if self.cache_dir is None:

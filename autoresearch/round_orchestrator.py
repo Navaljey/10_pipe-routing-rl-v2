@@ -34,13 +34,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from autoresearch.optuna_study import (
+    ask_waiting_trials,
     create_study,
     enqueue_round1_grid,
     enqueue_round2_grid,
     get_param_importances,
+    register_grid_params,
 )
 from autoresearch.stage_runner import StageRunner, VariantResult, STAGE1_TIMESTEPS, STAGE2_TIMESTEPS
 from autoresearch.wandb_callback import (
@@ -171,11 +173,19 @@ class RoundOrchestrator:
         study = create_study(step_n=self.step_n, round_n=1, storage=storage)
         enqueue_round1_grid(study)
 
-        # WAITING trial 에서 params 추출
-        variants = self._waiting_params(study)
+        # WAITING trial 을 ask() 로 pop (RUNNING 전환) 하며 params 추출.
+        # study.tell() 은 RUNNING trial 에만 적용 가능하므로 (WAITING 은 불가)
+        # 실행 전에 미리 전환해 둔다. §16.6.5.
+        trials = ask_waiting_trials(study)
+        # suggest_categorical() 으로 params/distributions 를 채워야 아래
+        # get_param_importances() 가 실제로 계산 가능해진다 (§16.6.5).
+        register_grid_params(trials)
+        variants = [dict(t.system_attrs.get("fixed_params", {})) for t in trials]
         logger.info("[orchestrator] Round 1 variants: %d", len(variants))
 
-        result = self._run_round(round_n=1, variants=variants, fixed_params={})
+        result = self._run_round(
+            round_n=1, variants=variants, fixed_params={}, study=study, trials=trials,
+        )
 
         # importance 분석 (completed trial 이 충분하면)
         importances = get_param_importances(study)
@@ -206,13 +216,17 @@ class RoundOrchestrator:
         study = create_study(step_n=self.step_n, round_n=2, storage=storage)
         enqueue_round2_grid(study)
 
-        variants_base = self._waiting_params(study)
-        # 각 variant 에 고정 α, β 삽입
+        trials = ask_waiting_trials(study)
+        register_grid_params(trials)
+        variants_base = [dict(t.system_attrs.get("fixed_params", {})) for t in trials]
+        # 각 variant 에 고정 α, β 삽입 (trials 와 순서 동일하게 유지)
         variants = [{**fixed, **v} for v in variants_base]
         logger.info("[orchestrator] Round 2 variants: %d (α=%.2f, β=%.2f 고정)",
                     len(variants), fixed.get("alpha", 0), fixed.get("beta", 0))
 
-        result = self._run_round(round_n=2, variants=variants, fixed_params=fixed)
+        result = self._run_round(
+            round_n=2, variants=variants, fixed_params=fixed, study=study, trials=trials,
+        )
         result = RoundResult(
             round_n=2,
             best=result.best,
@@ -289,8 +303,23 @@ class RoundOrchestrator:
         round_n: int,
         variants: list[dict],
         fixed_params: dict,
+        study: Any | None = None,
+        trials: list[Any] | None = None,
     ) -> RoundResult:
         """Stage 1 → Stage 2 실행. best params + fixed_params 를 다음 Round 고정값으로 반환.
+
+        study/trials 가 주어지면 (run_round1/run_round2 표준 경로) 각 variant 의
+        최종 metric 을 study.tell() 로 대응 Optuna trial 에 반영해
+        WAITING(ask 이후엔 RUNNING) → COMPLETE 로 전환한다:
+          - Stage 1 탈락 variant → Stage 1 metric 이 최종값
+          - Stage 2 까지 도달한 variant (survivor) → Stage 2 metric 이 최종값
+        study/trials 가 없으면 (run_round_generic 처럼 enqueue 를 거치지 않은
+        variants) trial 완료 처리를 건너뛴다.
+
+        한계: run_full() 이 stage1_survivors 캐시를 히트해 Stage 1 을 스킵하면
+        (세션 재개 시) on_stage1_complete 콜백이 호출되지 않으므로, 그 세션에서
+        Stage 1 탈락했던 variant 는 이번 호출에서 tell() 되지 않는다 (직전
+        세션에서 이미 처리되었어야 함).
 
         오케스트레이터 wandb run (step{N}_round{R}_orch) 을 열고
         Stage 1/2 집계 summary 를 기록한다.
@@ -304,11 +333,29 @@ class RoundOrchestrator:
             mode=self.wandb_mode,
         )
 
+        def _tell(result: VariantResult) -> None:
+            if study is None or trials is None or result.variant_id >= len(trials):
+                return
+            trial = trials[result.variant_id]
+            try:
+                study.tell(trial.number, result.metric)
+            except Exception as e:
+                logger.warning(
+                    "[orchestrator] var%03d → trial#%d study.tell 실패: %s",
+                    result.variant_id, trial.number, e,
+                )
+
         def _on_stage1(all_results, survivors):
             log_stage1_summary(self.step_n, round_n, all_results, survivors)
+            survivor_ids = {r.variant_id for r in survivors}
+            for r in all_results:
+                if r.variant_id not in survivor_ids:
+                    _tell(r)   # Stage 1 탈락 → Stage 1 metric 으로 trial 완료
 
         def _on_stage2(all_results, best):
             log_stage2_summary(self.step_n, round_n, all_results, best)
+            for r in all_results:
+                _tell(r)       # Stage 2 도달 → Stage 2 metric 으로 trial 완료
 
         runner = StageRunner(
             train_fn=self.train_fn,
@@ -342,19 +389,3 @@ class RoundOrchestrator:
         if self.optuna_storage is None:
             return None
         return self.optuna_storage
-
-    @staticmethod
-    def _waiting_params(study) -> list[dict]:
-        """WAITING trial 에서 enqueue 된 params 추출.
-
-        WAITING trial 은 t.params 가 비어있고
-        실제 값은 t.system_attrs['fixed_params'] 에 있음 (Optuna 내부 동작).
-        """
-        import optuna
-        result = []
-        for t in study.trials:
-            if t.state == optuna.trial.TrialState.WAITING:
-                fp = t.system_attrs.get("fixed_params", {})
-                if fp:
-                    result.append(dict(fp))
-        return result

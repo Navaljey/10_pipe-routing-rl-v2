@@ -347,8 +347,14 @@ def test_max_workers_within_limit_no_warning(caplog):
 
 # ─── 6. 실패 variant 처리 ────────────────────────────────────────────────────
 
-def test_failed_variant_gets_neg_inf_metric():
-    """train_fn 예외 → metric=-inf, Stage 1 에서 제거된다."""
+@pytest.mark.parametrize("max_workers", [1, 2])
+def test_failed_variant_gets_neg_inf_metric(max_workers):
+    """train_fn 예외 → metric=-inf, Stage 1 에서 제거된다.
+
+    sequential(max_workers=1) 경로와 parallel(max_workers=2) 경로가 동일하게
+    동작하는지 검증 — 예전에는 parallel 만 예외를 흡수하고 sequential 은
+    그대로 전파(크래시)해서 동작이 갈렸었다.
+    """
     call_count = [0]
 
     def train_fn_with_failure(params, timesteps, variant_id):
@@ -359,7 +365,7 @@ def test_failed_variant_gets_neg_inf_metric():
 
     runner = StageRunner(
         train_fn=train_fn_with_failure,
-        max_workers=2,  # parallel 로 실행해야 exception 처리 경로 통과
+        max_workers=max_workers,
         stage1_timesteps=10,
         stage2_timesteps=20,
     )
@@ -367,6 +373,43 @@ def test_failed_variant_gets_neg_inf_metric():
     survivors = runner.run_stage1(variants)
     # 실패 variant (metric=-inf) 는 제거됨
     assert all(s.metric > float("-inf") for s in survivors)
+
+
+def test_failed_variant_sequential_does_not_crash(caplog):
+    """sequential 모드에서 train_fn 예외가 나도 run_stage1() 전체가 죽지 않는다."""
+    def train_fn_always_fails(params, timesteps, variant_id):
+        raise RuntimeError("boom")
+
+    runner = StageRunner(
+        train_fn=train_fn_always_fails,
+        max_workers=1,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+    )
+    with caplog.at_level(logging.ERROR):
+        survivors = runner.run_stage1([{"a": 1}, {"a": 2}, {"a": 3}, {"a": 4}])
+
+    assert len(survivors) >= 1
+    assert all(s.metric == float("-inf") for s in survivors)
+    # traceback 이 로그에 실제로 남는지 (str(e) 만 남기고 버리지 않는지) 확인
+    assert "boom" in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_failed_variant_result_not_cached(tmp_path):
+    """실패한 variant 는 캐시 파일로 저장되지 않는다 (버그 수정 후 재시도 가능해야 함)."""
+    def train_fn_always_fails(params, timesteps, variant_id):
+        raise RuntimeError("boom")
+
+    runner = StageRunner(
+        train_fn=train_fn_always_fails,
+        max_workers=1,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=str(tmp_path),
+    )
+    runner.run_stage1([{"a": 1}, {"a": 2}])
+    assert not list(tmp_path.glob("stage1_var*.json"))
 
 
 # ─── 7. 상수 값 spec 정합 ────────────────────────────────────────────────────
