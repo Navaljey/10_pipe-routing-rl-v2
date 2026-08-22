@@ -141,6 +141,64 @@ def enqueue_round2_grid(study: optuna.Study) -> None:
     logger.info("[optuna] enqueued %d / 36 Round 2 grid trials", queued)
 
 
+def ask_waiting_trials(study: optuna.Study) -> list[optuna.trial.Trial]:
+    """WAITING trial 을 전부 study.ask() 로 pop 하여 RUNNING Trial 리스트로 반환.
+
+    실측 확인: study.tell() 은 RUNNING 상태 trial 에만 적용 가능하며 WAITING
+    trial 에 직접 tell() 하면 ``ValueError: Cannot tell a WAITING trial.`` 발생.
+    enqueue_trial() 로 등록한 grid trial 을 실제로 실행하고 완료 처리하려면
+    반드시 이 함수로 먼저 ask() 해서 RUNNING 으로 전환해야 한다.
+
+    반환된 Trial.system_attrs['fixed_params'] 에 enqueue 시 넣은 값이 그대로
+    보존되므로 suggest_* 호출 없이 params 를 읽을 수 있다.
+
+    ask() 는 WAITING queue 를 FIFO 로 소진하므로, 호출 시점의 WAITING 개수만큼만
+    반복한다 (그 이상 호출하면 sampler 가 새 trial 을 만들어버림).
+    """
+    n_waiting = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.WAITING)
+    return [study.ask() for _ in range(n_waiting)]
+
+
+def register_grid_params(trials: list[optuna.trial.Trial]) -> None:
+    """ask() 로 얻은 Trial 들에 suggest_categorical() 을 호출해 params/distributions 를 채운다.
+
+    실측 확인: enqueue_trial() + ask() + system_attrs 읽기만으로는
+    trial.params/distributions 가 항상 빈 dict 로 남는다 (suggest_* 를 한 번도
+    안 불렀으므로). 그 상태로는 get_param_importances() 가 예외 없이 그냥
+    빈 dict 를 반환한다 — "인자 중요도로 다음 Round sweep 대상을 정한다"는
+    §16.6.5 목적을 조용히 무력화시킨다.
+
+    이 그룹(trials) 안에서 실제로 나타난 값들의 합집합을 각 key 의 choices 로
+    삼아 suggest_categorical(key, choices) 를 호출하면:
+      - enqueue 시 넣은 값이 그대로 반환되고 (거짓 샘플링 아님, 실측 확인)
+      - 모든 trial 이 동일한 분포(choices) 를 공유하게 되어
+        importance 분석이 정상 동작한다 (실측 확인).
+
+    Round 1 / Round 2 처럼 params 키 구성이 다른 그룹을 한 번에 넘기지 말 것 —
+    ask_waiting_trials() 로 얻은, 같은 grid 에서 나온 trials 끼리만 호출한다.
+    """
+    if not trials:
+        return
+
+    keys: set[str] = set()
+    for t in trials:
+        keys.update(t.system_attrs.get("fixed_params", {}).keys())
+
+    choices: dict[str, list] = {
+        key: sorted({
+            t.system_attrs["fixed_params"][key]
+            for t in trials
+            if key in t.system_attrs.get("fixed_params", {})
+        })
+        for key in keys
+    }
+
+    for t in trials:
+        fp = t.system_attrs.get("fixed_params", {})
+        for key in fp:
+            t.suggest_categorical(key, choices[key])
+
+
 def get_param_importances(study: optuna.Study) -> dict[str, float]:
     """인자 중요도 추출 (Round 종료 시). §16.6.5.
 

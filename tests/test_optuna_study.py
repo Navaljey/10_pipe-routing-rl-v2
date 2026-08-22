@@ -20,11 +20,13 @@ import optuna
 import pytest
 
 from autoresearch.optuna_study import (
+    ask_waiting_trials,
     create_study,
     enqueue_round1_grid,
     enqueue_round2_grid,
     get_best_params,
     get_param_importances,
+    register_grid_params,
 )
 
 
@@ -176,6 +178,109 @@ def test_importance_values_sum_to_one(storage):
     importances = get_param_importances(study)
     if importances:  # 계산 가능한 경우만 검증
         assert math.isclose(sum(importances.values()), 1.0, abs_tol=0.01)
+
+
+# ─── 5. ask_waiting_trials / register_grid_params (enqueue → tell 연동) ──────
+#
+# 회귀 배경: enqueue_trial() 로 등록한 WAITING trial 을 study.tell() 로 바로
+# 완료 처리할 수 없다 (실측: ValueError "Cannot tell a WAITING trial.").
+# ask_waiting_trials() 로 먼저 RUNNING 전환해야 하고, suggest_* 를 한 번도
+# 안 부르면 trial.params 가 비어 get_param_importances() 가 조용히 빈 dict 를
+# 반환한다 — register_grid_params() 가 이를 채운다.
+
+def test_tell_on_waiting_trial_raises(storage):
+    """WAITING trial 에 직접 study.tell() 하면 실패한다 (Optuna 실측 동작).
+
+    ask_waiting_trials() 가 왜 필요한지에 대한 회귀 가드.
+    """
+    study = create_study(step_n=1, round_n=1, storage=storage)
+    study.enqueue_trial({"alpha": 0.5})
+    waiting = [t for t in study.trials if t.state == optuna.trial.TrialState.WAITING]
+    with pytest.raises(ValueError):
+        study.tell(waiting[0].number, 0.5)
+
+
+def test_ask_waiting_trials_transitions_to_running(storage):
+    study = create_study(step_n=1, round_n=1, storage=storage)
+    enqueue_round1_grid(study)
+    trials = ask_waiting_trials(study)
+    assert len(trials) == 12
+    assert all(
+        study.trials[t.number].state == optuna.trial.TrialState.RUNNING
+        for t in trials
+    )
+    assert not any(t.state == optuna.trial.TrialState.WAITING for t in study.trials)
+
+
+def test_ask_waiting_trials_preserves_fixed_params(storage):
+    study = create_study(step_n=1, round_n=1, storage=storage)
+    study.enqueue_trial({"alpha": 2.0, "beta": 0.3})
+    trials = ask_waiting_trials(study)
+    assert trials[0].system_attrs["fixed_params"] == {"alpha": 2.0, "beta": 0.3}
+
+
+def test_ask_then_tell_completes_trial(storage):
+    """ask() 로 RUNNING 전환 후에는 tell() 이 정상적으로 COMPLETE 처리한다."""
+    study = create_study(step_n=1, round_n=1, storage=storage)
+    study.enqueue_trial({"alpha": 0.5})
+    trial = ask_waiting_trials(study)[0]
+    study.tell(trial.number, 0.75)
+    assert study.trials[trial.number].state == optuna.trial.TrialState.COMPLETE
+    assert study.trials[trial.number].value == pytest.approx(0.75)
+
+
+def test_ask_then_tell_accepts_neg_inf(storage):
+    """실패 variant 의 metric=-inf 도 tell() 이 그대로 받아들인다 (StageRunner 연동)."""
+    study = create_study(step_n=1, round_n=1, storage=storage)
+    study.enqueue_trial({"alpha": 0.5})
+    trial = ask_waiting_trials(study)[0]
+    study.tell(trial.number, float("-inf"))
+    assert study.trials[trial.number].state == optuna.trial.TrialState.COMPLETE
+    assert study.trials[trial.number].value == float("-inf")
+
+
+def test_register_grid_params_populates_trial_params(storage):
+    """register_grid_params() 이후 trial.params 에 enqueue 했던 값이 그대로 들어간다."""
+    study = create_study(step_n=1, round_n=1, storage=storage)
+    enqueue_round1_grid(study)
+    trials = ask_waiting_trials(study)
+    assert all(t.params == {} for t in trials)  # register 전에는 비어있음 (실측)
+
+    register_grid_params(trials)
+    for t in trials:
+        fp = t.system_attrs["fixed_params"]
+        assert t.params["alpha"] == fp["alpha"]
+        assert t.params["beta"] == fp["beta"]
+
+
+def test_register_grid_params_enables_importance(storage):
+    """register_grid_params() 없이는 importance 가 항상 {} 이고, 있으면 계산된다.
+
+    §16.6.5: Round 종료 시 어떤 인자가 결과를 가장 설명하는지 정량 추출해야
+    Round 2 sweep 대상을 정할 수 있다. suggest_* 미호출 상태로는 이게
+    구조적으로 불가능함을 회귀 가드로 남긴다.
+    """
+    def run(with_register: bool) -> dict:
+        study = create_study(
+            step_n=1, round_n=1 if with_register else 2, storage=storage,
+        )
+        enqueue_round1_grid(study)
+        trials = ask_waiting_trials(study)
+        if with_register:
+            register_grid_params(trials)
+        for t in trials:
+            fp = t.system_attrs["fixed_params"]
+            # alpha 가 beta 보다 압도적으로 중요하도록 결정적 점수 부여
+            study.tell(t.number, fp["alpha"] * 10 + fp["beta"])
+        return get_param_importances(study)
+
+    without = run(with_register=False)
+    assert without == {}, "suggest_* 없이는 importance 가 계산되면 안 됨 (실측 확인된 제약)"
+
+    with_reg = run(with_register=True)
+    assert with_reg, "register_grid_params() 이후에는 importance 가 계산돼야 함"
+    assert "alpha" in with_reg and "beta" in with_reg
+    assert with_reg["alpha"] > with_reg["beta"]
 
 
 # ─── 4. get_best_params ──────────────────────────────────────────────────────

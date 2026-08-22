@@ -286,6 +286,61 @@ def test_round2_state_has_two_results(tmp_storage):
     assert len(orch.state.round_results) == 2
 
 
+# ─── 3.5 Optuna trial 완료 + importance (회귀 가드) ──────────────────────────
+#
+# 배경: 예전에는 enqueue_trial() 로 등록된 WAITING trial 이 학습 후에도
+# COMPLETE 로 전환되지 않아 영원히 WAITING 에 남았고, importance 도 항상
+# 빈 dict 였다 (Round 2 진행 근거 없음). run_round1()/run_round2() 가
+# study.tell() 을 실제로 호출하는지를 공개 API 레벨에서 검증한다.
+
+def _all_trials_of(orch: RoundOrchestrator, round_n: int):
+    import optuna
+    study = optuna.load_study(
+        study_name=f"step{orch.step_n}_round{round_n}", storage=orch.optuna_storage,
+    )
+    return study.trials
+
+
+def test_round1_all_trials_complete(tmp_storage):
+    """run_round1() 이후 12개 trial 이 전부 COMPLETE (WAITING 에 안 남는다)."""
+    orch = make_orchestrator(make_train_fn(), tmp_storage)
+    orch.run_round1()
+
+    trials = _all_trials_of(orch, round_n=1)
+    assert len(trials) == 12
+    assert all(t.state.name == "COMPLETE" for t in trials)
+
+
+def test_round1_importances_non_empty_with_varying_scores(tmp_storage):
+    """alpha 에 따라 점수가 크게 갈리면 importances 가 실제로 alpha 를 잡아낸다."""
+    alpha_score = {0.5: 0.1, 1.0: 0.2, 2.0: 0.9, 5.0: 0.3}
+
+    def train_fn(params, timesteps, variant_id):
+        return alpha_score.get(params.get("alpha"), 0.5)
+
+    orch = make_orchestrator(train_fn, tmp_storage)
+    result = orch.run_round1()
+
+    assert result.importances, "importances 가 비어있으면 안 됨 (register_grid_params 회귀)"
+    assert "alpha" in result.importances
+
+
+def test_round1_failed_variants_still_complete_trial(tmp_storage):
+    """일부 variant 가 예외로 실패해도 (metric=-inf) trial 은 COMPLETE 로 남는다."""
+    def train_fn(params, timesteps, variant_id):
+        if params.get("alpha") == 5.0:
+            raise RuntimeError("intentional failure")
+        return 0.5
+
+    orch = make_orchestrator(train_fn, tmp_storage, workers=2)
+    orch.run_round1()
+
+    trials = _all_trials_of(orch, round_n=1)
+    assert all(t.state.name == "COMPLETE" for t in trials)
+    neg_inf_trials = [t for t in trials if t.value == float("-inf")]
+    assert len(neg_inf_trials) >= 1
+
+
 # ─── 4. fixed_params 전파 ────────────────────────────────────────────────────
 
 def test_fixed_params_propagated_to_next_round(tmp_storage):
