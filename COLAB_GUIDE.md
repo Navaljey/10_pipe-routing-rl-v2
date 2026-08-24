@@ -1,6 +1,13 @@
 # Colab 실행 가이드 — Phase 1 Round 1 (Sub-단계 5.3)
 
-> 무료 Colab T4 (12시간 세션) 기준. worker=2 (안전), 내결함성 캐시 활성.
+> 무료 Colab T4 (12시간 세션) 기준. worker=1 (순차 실행), 내결함성 캐시 활성.
+>
+> **worker=1 인 이유**: `StageRunner`/`RoundOrchestrator` 의 병렬 실행은 `ThreadPoolExecutor`
+> (OS 스레드) 기반이다. 학습 루프가 `n_envs=1` 단일 env + 작은 MLP(256×256)로 대부분
+> CPU 바운드(Python GIL 이 자주 안 풀림)이고, 무료 Colab 은 vCPU 2개 + T4 1개를 공유하므로
+> `max_workers=2` 는 실제로는 GIL/CPU 경합만 늘려 **순차 실행보다 느려질 수 있다** (실측:
+> 70분 동안 12개 중 1개도 완료 못 함). §16.5.B 의 "동시 학습 2~3개" 는 진짜 병렬(프로세스
+> 기반) 실행을 전제로 한 수치이므로, 스레드 기반인 현재 구현에서는 worker=1 이 실측상 더 빠르다.
 
 ---
 
@@ -63,8 +70,8 @@ env.close()
 
 print(f"\n10K steps = {elapsed:.1f}s")
 print(f"250K ≈ {elapsed*25/60:.0f}분 | 2M ≈ {elapsed*200/3600:.1f}시간")
-print(f"Stage 1 예상 (12× 250K, worker 2): {elapsed*25*6/3600:.1f}시간")
-print(f"Stage 2 예상 (6× 2M, worker 2): {elapsed*200*3/3600:.1f}시간")
+print(f"Stage 1 예상 (12 variants × 250K, worker 1 순차): {elapsed*25*12/3600:.1f}시간")
+print(f"Stage 2 예상 (6 candidates × 2M, worker 1 순차): {elapsed*200*6/3600:.1f}시간")
 ```
 
 ---
@@ -148,7 +155,7 @@ def make_train_fn_real(n_envs=1, handoff_dir=None):
 orch_dry = RoundOrchestrator(
     train_fn=make_train_fn_real(n_envs=1),
     step_n=1,
-    max_workers=2,           # 무료 Colab 안전값
+    max_workers=1,           # 무료 Colab: ThreadPoolExecutor 는 GIL 경합으로 worker>1 이 더 느림
     stage1_timesteps=5_000,  # dry-run 전용
     stage2_timesteps=5_000,
     optuna_storage=f"sqlite:///{PROJECT}/autoresearch_dry.db",
@@ -170,7 +177,7 @@ print("\n✅ 12개 variant 모두 정상 — Stage 1 본 실행 진행 가능")
 ```python
 """
 Stage 1: 12 variants × 250K timestep.
-무료 Colab T4 + worker 2 기준 예상 ~2~3시간.
+무료 Colab T4 + worker 1(순차) 기준 예상 ~3~4시간.
 세션 끊기면 같은 셀 재실행 → 완료된 variant 캐시 재사용.
 학습 "도중" 끊긴 경우는 §8 의 복구 절차를 먼저 실행할 것.
 """
@@ -217,7 +224,7 @@ def _tell_stage1(all_results, survivors):
 
 runner = StageRunner(
     train_fn=make_train_fn_real(n_envs=1),
-    max_workers=2,
+    max_workers=1,               # ThreadPoolExecutor GIL 경합 회피 (상단 안내 참조)
     stage1_timesteps=250_000,
     stage2_timesteps=2_000_000,
     cache_dir=CACHE_DIR,        # 내결함성 캐시
@@ -245,7 +252,7 @@ print("→ 위 생존자 metric 분포를 확인하고 이상 없으면 셀 6(St
 ```python
 """
 Stage 2: Stage 1 생존자 × 2M timestep.
-무료 Colab T4 + worker 2 기준 예상 ~3~6시간.
+무료 Colab T4 + worker 1(순차) 기준 예상 ~12~14시간 — 세션 1개로 안 끝날 수 있음.
 세션 끊기면 같은 셀 재실행 → 완료된 variant 캐시 재사용.
 학습 "도중" 끊긴 경우는 §8 의 복구 절차를 먼저 실행할 것.
 """
@@ -282,7 +289,7 @@ def _tell_stage2(all_results, best):
 
 runner2 = StageRunner(
     train_fn=make_train_fn_real(n_envs=1),
-    max_workers=2,
+    max_workers=1,                # ThreadPoolExecutor GIL 경합 회피 (상단 안내 참조)
     stage1_timesteps=250_000,
     stage2_timesteps=2_000_000,
     cache_dir=CACHE_DIR,
@@ -368,13 +375,13 @@ os.remove(f"{PROJECT}/autoresearch_round1.db")   # Optuna DB만 삭제. cache/ro
 
 ---
 
-## 타임라인 예상 (무료 Colab T4, worker 2)
+## 타임라인 예상 (무료 Colab T4, worker 1 — 순차 실행)
 
 | 단계 | 예상 시간 | 세션 내 완료 여부 |
 |------|---------|----------------|
 | dry-run (12 × 5K) | ~3~5분 | ✅ |
-| Stage 1 (12 × 250K, worker 2) | ~2~3시간 | ✅ (12시간 내) |
-| Stage 2 (6 × 2M, worker 2) | ~4~8시간 | ⚠️ 세션 끊기면 캐시로 복구 |
-| **Round 1 합계** | **~6~11시간** | ⚠️ 무료 12시간 아슬아슬 |
+| Stage 1 (12 × 250K, worker 1) | ~3~4시간 | ✅ (12시간 내) |
+| Stage 2 (6 × 2M, worker 1) | ~12~14시간 | ⚠️ 세션 1개로 안 끝남 — 캐시로 이어서 진행 |
+| **Round 1 합계** | **~15~18시간** | ⚠️ 최소 2세션 필요. 무료 tier 사용량 한도는 고정 12시간이 아니라 최근 사용량에 따라 변동하므로 3세션 이상 걸릴 수 있음 |
 
-> **팁**: Stage 1 완료 후 결과 저장 확인 (셀 5 마지막 줄) → Stage 2는 새 세션에서 시작해도 캐시로 복구됩니다.
+> **팁**: Stage 1 완료 후 결과 저장 확인 (셀 5 마지막 줄) → Stage 2는 새 세션에서 시작해도 캐시로 복구됩니다. Stage 2 개별 variant(약 2.2시간)는 세션 한도보다 훨씬 짧으므로, 세션이 끊겨도 대부분 "variant 경계"에서 끊기고 §8 의 "학습 도중" 복구 절차까지 필요한 경우는 드뭅니다.
