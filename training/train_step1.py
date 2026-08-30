@@ -314,11 +314,16 @@ def _evaluate_success_rate(model, alpha: float, beta: float,
         env = Step1Env(
             mode="final_eval",
             difficulty=difficulty,
-            seed=eval_seed + i,
             alpha=alpha,
             beta=beta,
         )
-        obs, _ = env.reset()
+        # 주의: seed 는 반드시 reset() 에 넘겨야 시나리오(occupancy/start/goal)가
+        # 실제로 바뀐다. 생성자의 seed= 는 start_dir/goal_dir 추첨용 RNG만
+        # 초기화할 뿐 _forced_scenario_seed 를 세팅하지 않아, 매 episode 마다
+        # 새 인스턴스를 만들면 _next_seed() 폴백이 항상 pool[0] 하나로 고정된다
+        # (FAILURE_LOG.md 참조 — Round 1 Stage 1/2 20-episode 평가가 전부 동일
+        # 시나리오였던 원인).
+        obs, _ = env.reset(seed=eval_seed + i)
         done = False
         length = 0
         while not done:
@@ -335,6 +340,95 @@ def _evaluate_success_rate(model, alpha: float, beta: float,
     return {
         "success_rate": successes / n_episodes,
         "mean_ep_length": float(np.mean(ep_lengths)),
+    }
+
+
+# screening 순위용 composite score 안전장치 (CLAUDE.md §11.0.2, §11.2).
+# score = success_rate - SCREENING_LENGTH_RATIO_EPS * min(mean_length_ratio, CAP)
+# success_rate 는 75개 episode 기준 1/75 단위로만 변하므로, length_ratio 항이
+# EPS*CAP < 1/75 를 만족하면 절대 success_rate 순위를 뒤집지 못하고 동률일 때만
+# tie-break 역할을 한다 (lexicographic 정렬과 동일한 순서를 하나의 float 로 인코딩).
+SCREENING_N_EPISODES = 75
+SCREENING_LENGTH_RATIO_CAP = 10.0
+SCREENING_LENGTH_RATIO_EPS = 1e-3
+assert SCREENING_LENGTH_RATIO_EPS * SCREENING_LENGTH_RATIO_CAP < 1.0 / SCREENING_N_EPISODES
+
+
+def _evaluate_screening(model, alpha: float, beta: float) -> dict:
+    """Stage 1/2 screening 평가. CLAUDE.md §11.0(75개 고정, Easy:Medium:Hard=3:5:2) + §11.2(length_ratio).
+
+    §11.2 는 "success_rate AND length_ratio" 채택 조건(둘 다 임계값 통과)을 정의하지만,
+    screening 은 순위가 필요하므로 lexicographic 정렬(success_rate 우선, length_ratio
+    tie-break)을 단일 float score 로 인코딩해 반환한다 — 근거는 위 상수 블록 주석 참조.
+
+    L_astar 는 §12.4 의 강제 첫 스텝(start_dir_idx)을 반영해, "start_dir_idx 방향
+    이웃 cell"을 기준점으로 BFS 최단거리 + 1 로 계산한다 (raw start 기준이면 물리
+    제약 때문에 돌아간 거리를 RL 에게 부당하게 불리하게 매기게 된다).
+    """
+    from envs.base_env import FACE_DIRS
+    from envs.scenario_generator import (
+        STEP1_SCREENING_SEEDS_EASY,
+        STEP1_SCREENING_SEEDS_HARD,
+        STEP1_SCREENING_SEEDS_MEDIUM,
+        bfs_shortest_path_length,
+    )
+    from envs.step1_env import Step1Env
+
+    seed_pools = {
+        "easy": STEP1_SCREENING_SEEDS_EASY,
+        "medium": STEP1_SCREENING_SEEDS_MEDIUM,
+        "hard": STEP1_SCREENING_SEEDS_HARD,
+    }
+
+    successes = 0
+    length_ratios: list[float] = []
+    by_difficulty: dict[str, dict[str, int]] = {
+        d: {"n": len(seeds), "success": 0} for d, seeds in seed_pools.items()
+    }
+
+    for difficulty, seeds in seed_pools.items():
+        for seed in seeds:
+            env = Step1Env(mode="screening", difficulty=difficulty, alpha=alpha, beta=beta)
+            obs, _ = env.reset(seed=seed)
+
+            start_neighbor = env.agent_cell + FACE_DIRS[env.start_dir_idx]
+            if env.is_occupied(start_neighbor):
+                a_star_length = None  # 강제 첫 스텝 자체가 막힘 — benchmark 정의 불가
+            else:
+                d_rest = bfs_shortest_path_length(env.occupancy, start_neighbor, env.goal_cell)
+                a_star_length = None if d_rest is None else d_rest + 1
+
+            done = False
+            length = 0
+            while not done:
+                mask = env.action_masks()
+                action, _ = model.predict(obs, action_masks=mask, deterministic=True)
+                obs, _, terminated, truncated, info = env.step(int(action))
+                done = terminated or truncated
+                length += 1
+
+            if info.get("termination") == "goal_reached":
+                successes += 1
+                by_difficulty[difficulty]["success"] += 1
+                if a_star_length is not None and a_star_length > 0:
+                    length_ratios.append(length / a_star_length)
+            env.close()
+
+    n_total = sum(len(seeds) for seeds in seed_pools.values())
+    success_rate = successes / n_total
+    mean_length_ratio = float(np.mean(length_ratios)) if length_ratios else None
+    length_penalty = (
+        min(mean_length_ratio, SCREENING_LENGTH_RATIO_CAP)
+        if mean_length_ratio is not None
+        else 0.0
+    )
+    score = success_rate - SCREENING_LENGTH_RATIO_EPS * length_penalty
+
+    return {
+        "success_rate": success_rate,
+        "mean_length_ratio": mean_length_ratio,
+        "score": score,
+        "by_difficulty": by_difficulty,
     }
 
 

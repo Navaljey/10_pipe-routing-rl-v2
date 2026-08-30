@@ -85,12 +85,16 @@ wandb.login()   # API key 입력 (처음 1회)
 
 ---
 
-## 4. 셀 4 — dry-run (12 variants × 5K, ~3분)
+## 4. 셀 4 — dry-run (12 variants × 5K, ~10~15분)
 
 ```python
 """
 dry-run: 12개 variant 모두 정상 init + 단기 학습 확인.
 Stage 1/2 본 실행 전 필수.
+screening 평가가 이제 75개 시나리오(Easy23/Medium37/Hard15)를 돌기 때문에,
+학습(5K) 자체보다 평가가 시간을 더 잡아먹을 수 있다 (variant당 최대 ~1분 내외,
+정책이 대부분 timeout 나면 더 걸릴 수 있음 — Stage 1/2 본 실행(250K/2M)에서는
+학습 시간이 훨씬 커서 무시할 수준).
 """
 import os
 os.chdir(PROJECT)
@@ -99,6 +103,19 @@ from training.train_step1 import run_training, parse_args, make_env_fn, build_mo
 from autoresearch.round_orchestrator import RoundOrchestrator
 
 CACHE_DIR = f"{PROJECT}/cache/round1"   # 내결함성 캐시
+
+# ⚠️ screening 평가 버그 수정(FAILURE_LOG.md 2026-08-30 entry) 이후 최초 재실행 시 필수.
+# 이전 버그로 12개 variant 전부 success_rate=0.9000(동일 시나리오 20회 반복) 으로 캐시/
+# Optuna DB 에 저장돼 있다. 지우지 않으면 캐시 히트로 그 잘못된 결과가 그대로 재사용된다.
+# 이미 한 번 정리했다면 다시 실행할 필요 없음(파일 없으면 조용히 넘어감).
+import shutil
+for _p in (f"{CACHE_DIR}_dry", CACHE_DIR):
+    shutil.rmtree(_p, ignore_errors=True)
+for _db in ("autoresearch_dry.db", "autoresearch_round1.db"):
+    _path = f"{PROJECT}/{_db}"
+    if os.path.exists(_path):
+        os.remove(_path)
+print("이전 버그 캐시/DB 정리 완료")
 
 def make_train_fn_real(n_envs=1, handoff_dir=None):
     """실제 Step1Env 기반 train_fn."""
@@ -138,15 +155,27 @@ def make_train_fn_real(n_envs=1, handoff_dir=None):
         model.learn(total_timesteps=timesteps,
                     callback=WandbCallback(gradient_save_freq=0, verbose=0))
 
-        # 평가: 20 episode
-        from training.train_step1 import _evaluate_success_rate
-        result = _evaluate_success_rate(model, alpha, beta, "medium", n_episodes=20)
-        success_rate = result["success_rate"]
+        # screening 평가: §11.0 spec 대로 75개 고정 시나리오(Easy 23/Medium 37/Hard 15).
+        # 매 episode 마다 reset(seed=) 로 시나리오를 명시 고정한다 — 이전 버그
+        # (생성자 seed= 만 주고 reset() 을 seed 없이 호출 → 20개가 전부 동일 시나리오)
+        # 는 _evaluate_screening() 내부에서 이미 고쳐져 있다. FAILURE_LOG.md 참조.
+        from training.train_step1 import _evaluate_screening
+        result = _evaluate_screening(model, alpha, beta)
 
-        wandb.log({"eval/success_rate": success_rate})
+        wandb.log({
+            "eval/success_rate": result["success_rate"],
+            "eval/mean_length_ratio": result["mean_length_ratio"] or 0.0,
+            "eval/score": result["score"],
+            "eval/success_rate_easy": result["by_difficulty"]["easy"]["success"] / result["by_difficulty"]["easy"]["n"],
+            "eval/success_rate_medium": result["by_difficulty"]["medium"]["success"] / result["by_difficulty"]["medium"]["n"],
+            "eval/success_rate_hard": result["by_difficulty"]["hard"]["success"] / result["by_difficulty"]["hard"]["n"],
+        })
         wandb.finish()
         vec_env.close()
-        return success_rate
+        # StageRunner/Optuna 는 이 반환값(score)으로 variant 순위를 매긴다.
+        # score = success_rate - EPS*length_ratio (lexicographic, §11.2) — 상세는
+        # training/train_step1.py 의 SCREENING_LENGTH_RATIO_EPS/CAP 주석 참조.
+        return result["score"]
 
     return train_fn
 
@@ -167,7 +196,22 @@ r1_dry = orch_dry.run_round1()
 print(f"\n=== dry-run 완료 ===")
 print(f"best: {r1_dry.best.params}  metric={r1_dry.best.metric:.4f}")
 print(f"importances: {r1_dry.importances}")
-print("\n✅ 12개 variant 모두 정상 — Stage 1 본 실행 진행 가능")
+
+# screening 평가 버그 수정 검증: 12개 variant 의 score 가 서로 달라야 한다.
+# 전부 동일하면(구 버그처럼) 평가가 아직도 variant 를 구분 못 하고 있다는 뜻이므로
+# Stage 1 본 실행으로 넘어가지 말고 먼저 원인을 다시 확인할 것.
+import glob, json
+_dry_scores = []
+for _f in sorted(glob.glob(f"{CACHE_DIR}_dry/stage1_var*.json")):
+    _dry_scores.append(json.loads(open(_f).read())["metric"])
+_n_unique = len(set(round(s, 6) for s in _dry_scores))
+print(f"\n12개 variant score: {[round(s, 4) for s in _dry_scores]}")
+assert _n_unique > 1, (
+    "12개 variant 의 score 가 전부 동일합니다 — screening 평가가 여전히 variant 를 "
+    "구분하지 못하고 있다는 신호입니다 (FAILURE_LOG.md 2026-08-30 entry 의 버그가 "
+    "재발했을 가능성). Stage 1 본 실행으로 넘어가지 마세요."
+)
+print(f"✅ variant 간 score 변별력 확인됨 (고유값 {_n_unique}개) — Stage 1 본 실행 진행 가능")
 ```
 
 ---
