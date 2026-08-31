@@ -37,6 +37,12 @@ STEP1_FINAL_EVAL_SEEDS: Final[list[int]] = list(range(130000, 130500))   # 500�
 STEP1_TRAIN_SEED_START: Final[int] = 150000
 STEP1_TRAIN_SEED_END: Final[int] = 199999                                 # 50000슬롯
 
+# Screening 75개의 난이도 분할 (CLAUDE.md §11.0.2, Easy:Medium:Hard = 3:5:2).
+# 연속 블록 방식 — §11.0.6 YAML 예시(회귀 150개)와 동일한 관례. 23+37+15=75.
+STEP1_SCREENING_SEEDS_EASY: Final[list[int]] = list(range(110000, 110023))    # 23개 (30.7%)
+STEP1_SCREENING_SEEDS_MEDIUM: Final[list[int]] = list(range(110023, 110060))  # 37개 (49.3%)
+STEP1_SCREENING_SEEDS_HARD: Final[list[int]] = list(range(110060, 110075))    # 15개 (20.0%)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 난이도 파라미터 (CLAUDE.md §11.0.8.3)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,6 +169,48 @@ def _bfs_reachable(
                 queue.append(pos)
 
     return False
+
+
+def bfs_shortest_path_length(
+    occupancy: npt.NDArray[np.bool_],
+    start: npt.NDArray[np.int32],
+    goal: npt.NDArray[np.int32],
+) -> int | None:
+    """6-connected BFS 최단 경로 길이 (step 수). 도달 불가 시 None.
+
+    격자가 6방향 unit-cost 이므로 BFS 최단거리 == A*(cost=length) 최적해와 동일하다
+    (admissible heuristic 을 쓰는 A* 와 unit-cost BFS 는 동일 최적값을 낸다).
+    §11.2 length_ratio(L_rl / L_astar) 의 L_astar 계산용 — 별도 A* 구현 불필요.
+
+    §12.4 참고: 에이전트는 첫 스텝이 start_dir_idx 방향으로 강제되므로, 공정한
+    비교를 위해서는 이 함수를 raw start 가 아니라 "start + FACE_DIRS[start_dir_idx]"
+    이웃 cell 에서 호출하고 결과에 +1 해야 한다 (호출부 책임).
+    """
+    if np.array_equal(start, goal):
+        return 0
+    shape = occupancy.shape
+    dist: dict[tuple[int, int, int], int] = {tuple(start): 0}  # type: ignore[dict-item]
+    queue: deque[tuple[int, int, int]] = deque([tuple(start)])  # type: ignore[arg-type]
+    goal_t = tuple(goal)
+
+    while queue:
+        cx, cy, cz = queue.popleft()
+        d0 = dist[(cx, cy, cz)]
+        for d in FACE_DIRS:
+            nx_, ny_, nz_ = cx + d[0], cy + d[1], cz + d[2]
+            if not (0 <= nx_ < shape[0] and 0 <= ny_ < shape[1] and 0 <= nz_ < shape[2]):
+                continue
+            if occupancy[nx_, ny_, nz_]:
+                continue
+            pos = (nx_, ny_, nz_)
+            if pos in dist:
+                continue
+            dist[pos] = d0 + 1
+            if pos == goal_t:
+                return dist[pos]
+            queue.append(pos)
+
+    return None
 
 
 def _n_free_face_neighbors(

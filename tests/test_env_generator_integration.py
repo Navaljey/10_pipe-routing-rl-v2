@@ -14,16 +14,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from envs.base_env import FACE_DIRS
 from envs.scenario_generator import (
     GENERATOR_VERSION,
     STEP1_FINAL_EVAL_SEEDS,
     STEP1_REGRESSION_SEEDS,
     STEP1_SCREENING_SEEDS,
+    STEP1_SCREENING_SEEDS_EASY,
+    STEP1_SCREENING_SEEDS_HARD,
+    STEP1_SCREENING_SEEDS_MEDIUM,
     STEP1_TRAIN_SEED_END,
     STEP1_TRAIN_SEED_START,
     ScenarioGeneratorV1,
     _bfs_reachable,
     _n_free_face_neighbors,
+    bfs_shortest_path_length,
 )
 from envs.step1_env import Step1Env
 
@@ -264,3 +269,105 @@ def test_generator_invalid_difficulty_raises() -> None:
     """잘못된 difficulty 를 주면 ValueError."""
     with pytest.raises(ValueError, match="difficulty must be"):
         _ = Step1Env(mode="train", difficulty="extreme", seed=0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# reset(seed=) 시나리오 다양성 회귀 테스트
+# (FAILURE_LOG.md 참조 — Round 1 Stage 1/2 20-episode 평가가 매 episode 새
+#  인스턴스를 만들고 생성자 seed= 만 넘긴 채 reset() 을 seed 없이 호출해,
+#  _forced_scenario_seed 가 항상 None → _next_seed() 폴백이 pool[0] 으로 고정되어
+#  20개 "episode" 가 전부 동일 시나리오였다.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_reset_seed_produces_distinct_scenarios() -> None:
+    """새 인스턴스 + reset(seed=X) 조합이면 seed 마다 다른 시나리오가 나온다."""
+    seen = set()
+    for i in range(20):
+        env = Step1Env(mode="final_eval", difficulty="medium")
+        obs, _ = env.reset(seed=130000 + i)
+        seen.add((tuple(env.agent_cell.tolist()), tuple(env.goal_cell.tolist())))
+        env.close()
+    assert len(seen) == 20, (
+        f"20개 seed 에서 {len(seen)}개의 고유 시나리오만 나왔습니다 — "
+        "reset(seed=) 대신 생성자 seed= 만 사용하면 재발하는 회귀입니다."
+    )
+
+
+def test_constructor_seed_alone_does_not_pin_scenario() -> None:
+    """생성자 seed= 만 주고 reset() 을 seed 없이 호출하면 시나리오가 고정된다 (알려진 함정).
+
+    이 테스트는 버그가 '고쳐졌다'가 아니라 '이 함정이 여전히 존재하고, 그래서
+    호출부는 반드시 reset(seed=) 를 써야 한다'는 사실 자체를 문서화한다.
+    """
+    seen = set()
+    for i in range(5):
+        env = Step1Env(mode="final_eval", difficulty="medium", seed=130000 + i)
+        obs, _ = env.reset()  # 의도적으로 seed 미전달
+        seen.add((tuple(env.agent_cell.tolist()), tuple(env.goal_cell.tolist())))
+        env.close()
+    assert len(seen) == 1, (
+        "이 함정이 더 이상 재현되지 않습니다 — Step1Env/BaseEnv 의 생성자 seed 와 "
+        "reset(seed=) 역할 분리가 바뀌었다면 training/train_step1.py 의 "
+        "_evaluate_success_rate / _evaluate_screening 이 여전히 안전한지 재검토하세요."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Screening 75개 난이도 분할 (CLAUDE.md §11.0.2, Easy:Medium:Hard=3:5:2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_screening_seed_split_sizes_and_ratio() -> None:
+    """23/37/15 분할이 75개 전체를 정확히 덮고 spec 비율(30/50/20%)에 근접한다."""
+    assert len(STEP1_SCREENING_SEEDS_EASY) == 23
+    assert len(STEP1_SCREENING_SEEDS_MEDIUM) == 37
+    assert len(STEP1_SCREENING_SEEDS_HARD) == 15
+    combined = (
+        STEP1_SCREENING_SEEDS_EASY
+        + STEP1_SCREENING_SEEDS_MEDIUM
+        + STEP1_SCREENING_SEEDS_HARD
+    )
+    assert sorted(combined) == STEP1_SCREENING_SEEDS, "분할 3개 합이 STEP1_SCREENING_SEEDS 전체와 정확히 일치해야 함"
+    assert len(set(combined)) == 75, "중복/누락 없이 75개"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bfs_shortest_path_length — §11.2 length_ratio 의 L_astar 계산용
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_bfs_shortest_path_length_open_grid_is_manhattan() -> None:
+    """장애물 없는 grid 에서 최단거리 == Manhattan distance."""
+    occ = np.zeros((30, 30, 30), dtype=np.bool_)
+    start = np.array([0, 0, 0], dtype=np.int32)
+    goal = np.array([3, 4, 5], dtype=np.int32)
+    assert bfs_shortest_path_length(occ, start, goal) == 12  # 3+4+5
+
+
+def test_bfs_shortest_path_length_same_cell_is_zero() -> None:
+    occ = np.zeros((30, 30, 30), dtype=np.bool_)
+    p = np.array([5, 5, 5], dtype=np.int32)
+    assert bfs_shortest_path_length(occ, p, p) == 0
+
+
+def test_bfs_shortest_path_length_detour_longer_than_manhattan() -> None:
+    """벽이 직선 경로를 막으면 최단거리가 Manhattan distance 보다 길어야 한다."""
+    occ = np.zeros((10, 10, 10), dtype=np.bool_)
+    occ[5, :, :] = True  # x=5 평면 전체를 막음 (양 끝에 구멍 없음 → 실제로는 우회 불가)
+    occ[5, 0, 0] = False  # 딱 한 칸만 뚫어 우회로 확보
+    start = np.array([0, 5, 5], dtype=np.int32)
+    goal = np.array([9, 5, 5], dtype=np.int32)
+    manhattan = 9
+    d = bfs_shortest_path_length(occ, start, goal)
+    assert d is not None
+    assert d > manhattan
+
+
+def test_bfs_shortest_path_length_unreachable_is_none() -> None:
+    """완전히 막힌 벽(구멍 없음)이면 None."""
+    occ = np.zeros((10, 10, 10), dtype=np.bool_)
+    occ[5, :, :] = True  # x=5 평면 완전 차단
+    start = np.array([0, 5, 5], dtype=np.int32)
+    goal = np.array([9, 5, 5], dtype=np.int32)
+    assert bfs_shortest_path_length(occ, start, goal) is None

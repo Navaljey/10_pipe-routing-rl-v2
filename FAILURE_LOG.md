@@ -214,6 +214,123 @@ Episode length 분포를 먼저 측정하고 reward scale 결정해야 함.
 
 > 본 entry는 placeholder 가 아닌 실제 실패 기록. 본 문서가 active learning resource 로 전환되는 시점.
 
+### 2026-08-30 — Round 1 screening 이 spec 을 안 따르고, 그마저도 20 episode 전부 동일 시나리오였음
+
+**상황:**
+Round 1 Stage 1(12 variants × 250K)이 완료됐으나 12개 variant 의 metric 이 전부
+`0.9000` 으로 동일해 생존자 6개가 성적이 아니라 variant 번호 순으로 잘리는
+현상을 사용자가 발견, 원인 분석 요청.
+
+**증상:**
+- Stage 1 12개 variant, 심지어 5K dry-run 까지 success_rate 가 정확히 0.9000 으로 일치.
+- 생존자 6개가 α ∈ {0.5, 1.0} (variant 앞 6개)로, 정렬 순서에 의한 결과로 의심됨.
+- wandb 에 `eval/success_rate` 가 학습 종료 후 딱 1개 점만 기록되어 학습 곡선 확인 불가.
+
+**원인 분석:**
+
+[원인 1. Screening 이 §11.0 spec(75개 고정, Easy:Medium:Hard=3:5:2)을 전혀 따르지 않음]
+`training/train_step1.py::_evaluate_success_rate()` 를 `COLAB_GUIDE.md` 의
+`make_train_fn_real` 이 Stage 1/2 screening 평가로 그대로 사용 중이었는데, 이 함수는
+`mode="final_eval"` 하드코딩 + `eval_seed=130000`(§11.0.4 **Final Eval** 범위 시작값)
++ `n_episodes=20` + `difficulty="medium"` 고정이었다. §11.0 의 screening 전용
+75개 seed(`STEP1_SCREENING_SEEDS`, 110000~110074)는 정의만 되어 있고 어디서도
+참조되지 않았다.
+
+[원인 2 (핵심). Step1Env 생성자 seed 와 reset(seed=) 의 역할 혼동으로 20개 "episode" 가
+전부 동일 시나리오였음]
+`Step1Env` 는 생성자의 `seed=` 와 `reset(seed=N)` 의 `seed=` 가 서로 다른 일을 한다:
+- 생성자 `seed=`: `_episode_rng` 초기화(→ start_dir_idx/goal_dir_idx 추첨)에만 쓰임
+- `reset(seed=N)`: 시나리오(occupancy/start/goal cell)를 결정하는 `_forced_scenario_seed` 설정
+
+`_evaluate_success_rate` 는 매 episode `Step1Env(seed=eval_seed+i, ...)` 로 **새 인스턴스**를
+만들고 `env.reset()` 을 **seed 없이** 호출했다. `_forced_scenario_seed=None` 이므로
+`_sample_scenario()` 는 `_next_seed()` 로 폴백하는데, 매번 새 인스턴스라 pool 카운터가
+항상 0부터 시작 → `STEP1_FINAL_EVAL_SEEDS[0]=130000` 이 **매번** 뽑혔다. `eval_seed+i`
+는 생성자에만 들어가고 시나리오 결정에는 전혀 영향을 주지 않는 죽은 코드였다.
+
+직접 재현 결과, 20개 seed 전부 occupancy 해시/start=[2,11,18]/goal=[10,5,15] 동일.
+그 고정된 미로에서 6방향 중 정확히 1방향(+Z)만 시작점 옆이 막혀 있었고, 첫 스텝은
+`action_masks()` Rule 1(§12.4 Hard Constraint)이 `start_dir_idx` 방향 하나만 강제하며
+**그 방향이 막혀있는지 검증하지 않는다**. `start_dir_idx` 는 생성자 seed 로 결정되는
+`_episode_rng` 추첨값이라 20개 episode 마다 달랐고, 그중 정확히 2개(seed 130000,
+130017)가 막힌 방향(+Z, index 4)을 뽑아 정책과 무관하게 1스텝째 즉시 collision 종료됐다.
+나머지 18개는 같은 미로를 다른 방향에서 볼 뿐이라 정책 품질이 결과에 거의 반영되지
+않았다 → 12개 variant + dry-run 전부 18/20=0.9000 으로 정확히 일치한 이유가 100% 설명됨.
+
+(참고: `training/regression_callback.py::evaluate_step_policy` 는 인스턴스 하나를
+재사용하며 반복 `reset()`(seed 없이) 하므로 pool 이 정상 순환해 이 버그의 영향을
+받지 않는다. 버그는 "매 episode 새 인스턴스를 만들고 생성자 seed 만 주는" 호출부
+패턴에서만 발생한다.)
+
+[부수 확인 — 학습 자체는 정상] `mode="train"` 은 `DummyVecEnv` 안에서 인스턴스가
+유지된 채 반복 `reset()`(seed 없이) 되므로 `_train_seed_counter` 가 150000부터
+정상 순환한다. 즉 250K 학습 자체는 실제로 진행됐으나, 평가가 고장나 그 차이가
+전혀 드러나지 않았을 뿐이다. wandb 1-point 문제는 버그가 아니라 현재 설계(학습
+종료 후 1회만 평가/로깅, 주기적 EvalCallback 없음)이며 이번 수정 범위에서는
+의도적으로 제외했다 (아래 "다루지 않은 것" 참조).
+
+**해결책:**
+1. `_evaluate_success_rate`: `Step1Env(seed=...)` 생성자 seed 제거, `env.reset(seed=eval_seed+i)` 로 명시.
+2. 신규 `_evaluate_screening(model, alpha, beta)` 추가 — §11.0 spec 대로 75개 고정
+   (easy 23/medium 37/hard 15, 연속 블록 분할: `STEP1_SCREENING_SEEDS_EASY/MEDIUM/HARD`)
+   을 `reset(seed=X)` 로 순회. 매 episode 마다 반드시 `reset(seed=)` 를 명시적으로 전달.
+3. §11.2 length_ratio(L_rl/L_astar) 추가. A* 대신 6-connected unit-cost BFS 사용(격자가
+   unit-cost 라 A*(cost=length) 최적해와 동일) — `envs/scenario_generator.py::bfs_shortest_path_length()`.
+   실측 비용: 75개 시나리오 BFS 전체 1.24초 (개당 16.6ms) — 시나리오당 1회 계산이라 무시 가능.
+   §12.4 강제 첫 스텝(start_dir_idx)을 반영해 "start_dir_idx 방향 이웃 cell" 에서
+   BFS 시작 + 1 로 계산해 공정성을 맞췄다.
+4. success_rate 와 length_ratio 를 하나의 순위로 결합: lexicographic (success_rate
+   1차, length_ratio 2차 tie-break) 를 단일 float `score` 로 인코딩
+   (`EPS * CAP < 1/75` 불변식으로 length_ratio 항이 success_rate 순위를 절대 못 뒤집게 보장).
+5. `COLAB_GUIDE.md` 의 `make_train_fn_real` 이 `_evaluate_screening` 을 쓰도록 갱신 +
+   "이 수정 이후 최초 재실행 시 이전 버그로 생긴 캐시/DB 삭제 필수" 안내 추가
+   (그렇지 않으면 예전의 잘못된 0.9000 결과가 캐시 히트로 재사용됨).
+6. 회귀 테스트 추가: `tests/test_env_generator_integration.py`
+   (`reset(seed=)` 시나리오 다양성 확인 + 이 함정이 여전히 존재함을 문서화하는
+   `test_constructor_seed_alone_does_not_pin_scenario`, BFS 정확성),
+   `tests/test_screening_eval.py` (`_evaluate_screening` 난이도 gradient, score 불변식).
+
+**다루지 않은 것 (의도적 범위 제외):**
+- wandb 학습 곡선(주기적 eval callback) — 진단 결과 학습 자체는 정상 진행된 것으로
+  확인되어 급하지 않음. 한 번에 두 가지를 바꾸면 다음 재실행 결과가 이상할 때
+  원인 분리가 어려워지므로 별도로 미룸.
+- variant 별 학습 seed 오프셋(`150000 + variant_id*100`) 무력화 — 같은 생성자
+  seed 무시 패턴이 `make_train_fn_real` 의 학습용 `DummyVecEnv` 구성에도 있지만,
+  모든 variant 가 동일한 학습 시나리오 순서를 쓰게 되는 효과라 공정 비교 관점에서는
+  오히려 중립적이라 판단, 이번 수정에서 건드리지 않음. 사실관계로 여기 기록만 남김.
+- `_get_action_mask()` Rule 1(첫 스텝 강제)이 그 방향이 막혀있는지 검증하지 않는 문제
+  자체는 이번에 고치지 않았다. 이번 fix 는 "screening 이 항상 같은 미로/구도만 봤다"는
+  문제를 없앴을 뿐, 새로 다양해진 75개 시나리오에서도 "무작위로 뽑힌 start_dir_idx 가
+  하필 막힌 방향" 케이스는 여전히 시나리오마다 일정 확률(대략 1/6 안팎, 장애물 밀도에
+  따라 다름)로 발생해 정책과 무관하게 실패로 잡힐 수 있다. Action mask 코어 로직을
+  건드리는 더 큰 변경이라 별도 세션에서 논의 필요 — screening/regression/final_eval
+  전반의 잠재적 노이즈 floor 로 남겨둠.
+
+**교훈:**
+1. **생성자 `seed=` 와 `reset(seed=)` 는 다른 일을 한다 — 시나리오를 고정하려면 항상
+   `reset(seed=)` 를 명시하라.** 이 프로젝트의 `Step1Env`/`BaseEnv` API 고유의 함정이며,
+   "매 episode 새 인스턴스를 만드는" 흔한 평가 루프 패턴과 결합하면 조용히(예외 없이)
+   시나리오가 고정되어 버린다 — 에러가 안 나서 발견이 늦어짐.
+2. **평가 metric 이 정확히 동일한 값으로 여러 variant 에 걸쳐 tie 나면 "우연"이 아니라
+   "평가 자체가 고장났다"는 신호로 먼저 의심하라.** 이번 케이스처럼 우연한 tie 로
+   치부하고 넘어갔다면 Round 1 전체가 무의미한 순위로 진행될 뻔했다.
+3. **screening/평가 함수는 §11.0 spec(고정 seed pool, 난이도 분할)을 문서 참조가
+   아니라 실제 호출부 코드에서 검증**해야 한다 — spec 상수(`STEP1_SCREENING_SEEDS`)가
+   정의돼 있다고 해서 실제로 쓰이고 있다는 보장은 없다.
+4. **버그 수정 후 재실행 시 이전(버그가 낳은) 캐시를 반드시 무효화**해야 한다 —
+   `StageRunner`/Optuna 캐시는 "이미 계산된 결과"를 정확도와 무관하게 재사용하므로,
+   평가 로직을 고쳐도 캐시를 안 지우면 예전의 잘못된 결과가 그대로 재사용된다.
+
+**관련 파일/위치:**
+- `training/train_step1.py::_evaluate_success_rate`, `_evaluate_screening` (신규)
+- `envs/scenario_generator.py::bfs_shortest_path_length` (신규), `STEP1_SCREENING_SEEDS_EASY/MEDIUM/HARD` (신규)
+- `envs/base_env.py::reset()`, `sample_start_goal_dirs()`, `Step1Env._get_action_mask()` Rule 1 (관련이지만 미수정)
+- `COLAB_GUIDE.md` 셀 4/5/6 (`make_train_fn_real`)
+- `docs/evaluation-spec.md` §11.0, §11.2
+- `tests/test_env_generator_integration.py`, `tests/test_screening_eval.py` (신규)
+
+---
+
 ### 2026-06-28 — CLAUDE.md §16.3.2 sweep 산술 오류 (4×3×3=27 → 실제 36)
 
 **상황:**
