@@ -9,6 +9,15 @@
 > 70분 동안 12개 중 1개도 완료 못 함). §16.5.B 의 "동시 학습 2~3개" 는 진짜 병렬(프로세스
 > 기반) 실행을 전제로 한 수치이므로, 스레드 기반인 현재 구현에서는 worker=1 이 실측상 더 빠르다.
 
+> **캐시 디렉터리 안내** (FAILURE_LOG.md 2026-09 entry — 과거 dry-run 셀이 진짜 결과를
+> 삭제한 사고 이후 정리):
+>
+> | 디렉터리 | 용도 | 자동 삭제 여부 |
+> |---|---|---|
+> | `cache/round1/` | Stage 1/2 **진짜** 결과(JSON + 모델 체크포인트) | **자동 삭제 절대 안 됨** — 부록 A 에서만, 확인 문구 입력 시에만 |
+> | `cache/round1_smoke/` | 셀 4 dry-run(5K) 전용 | 셀 4 실행마다 자동 정리됨 (버릴 데이터) |
+> | `cache/round1_cli_smoke/` | `scripts/dryrun_round1.py` — 로컬/CI 전용, **Colab 노트북과 무관** | 그 스크립트 실행마다 자동 정리됨 |
+
 ---
 
 ## 0. 사전 조건
@@ -99,26 +108,51 @@ screening 평가가 이제 75개 시나리오(Easy23/Medium37/Hard15)를 돌기 
 import os
 os.chdir(PROJECT)
 
+# GPU 확인 (하드 스톱) — FAILURE_LOG.md 참조: 이 확인이 없어 CPU로 7시간 학습되고도
+# 아무 경고 없이 넘어간 사고가 있었다. 정말 CPU로 진행하려면 REQUIRE_GPU = False.
+import torch
+REQUIRE_GPU = True
+if torch.cuda.is_available():
+    print(f"✅ GPU 사용 중: {torch.cuda.get_device_name(0)}")
+else:
+    print(
+        "⚠️ GPU 를 사용할 수 없습니다 — 이대로 진행하면 CPU 로 학습되어 250K/2M "
+        "학습이 수 배 이상 느려집니다 (실제 사고 사례: 7시간 동안 12개 중 8~9개만 완료).\n"
+        "   Colab 상단 메뉴 → 런타임 → 런타임 유형 변경 → 하드웨어 가속기 GPU 선택 후 "
+        "세션을 다시 시작하세요."
+    )
+    if REQUIRE_GPU:
+        raise RuntimeError(
+            "GPU 미사용 — REQUIRE_GPU=True(기본값) 라 중단합니다. "
+            "GPU 없이 계속하려면 이 셀 상단의 REQUIRE_GPU = False 로 바꾼 뒤 재실행하세요."
+        )
+
 from training.train_step1 import run_training, parse_args, make_env_fn, build_model
 from autoresearch.round_orchestrator import RoundOrchestrator
 
-CACHE_DIR = f"{PROJECT}/cache/round1"   # 내결함성 캐시
+CACHE_DIR = f"{PROJECT}/cache/round1"          # 진짜 Stage 1/2 결과 — 이 셀에서 절대 건드리지 않는다
+SMOKE_CACHE_DIR = f"{PROJECT}/cache/round1_smoke"  # dry-run 전용, 매번 새로 씀
 
-# ⚠️ screening 평가 버그 수정(FAILURE_LOG.md 2026-08-30 entry) 이후 최초 재실행 시 필수.
-# 이전 버그로 12개 variant 전부 success_rate=0.9000(동일 시나리오 20회 반복) 으로 캐시/
-# Optuna DB 에 저장돼 있다. 지우지 않으면 캐시 히트로 그 잘못된 결과가 그대로 재사용된다.
-# 이미 한 번 정리했다면 다시 실행할 필요 없음(파일 없으면 조용히 넘어감).
+# ⚠️ dry-run(smoke test) 전용 캐시/DB 만 정리한다. cache/round1/(진짜 결과)은 이 셀에서
+# 절대 삭제하지 않는다 — 예전에 여기서 실수로 CACHE_DIR 까지 지워 진짜 250K 결과
+# 8~9개가 통째로 사라진 사고가 있었다 (FAILURE_LOG.md 참조). 진짜 캐시를 지워야 하는
+# 경우는 이 문서 맨 아래 "부록 A. 위험 작업" 의 별도 확인 셀만 사용할 것.
 import shutil
-for _p in (f"{CACHE_DIR}_dry", CACHE_DIR):
-    shutil.rmtree(_p, ignore_errors=True)
-for _db in ("autoresearch_dry.db", "autoresearch_round1.db"):
-    _path = f"{PROJECT}/{_db}"
-    if os.path.exists(_path):
-        os.remove(_path)
-print("이전 버그 캐시/DB 정리 완료")
+shutil.rmtree(SMOKE_CACHE_DIR, ignore_errors=True)
+_dry_db = f"{PROJECT}/autoresearch_dry.db"
+if os.path.exists(_dry_db):
+    os.remove(_dry_db)
+print(f"dry-run 전용 캐시/DB 정리 완료 ({SMOKE_CACHE_DIR}) — cache/round1/ 은 건드리지 않음")
 
-def make_train_fn_real(n_envs=1, handoff_dir=None):
-    """실제 Step1Env 기반 train_fn."""
+def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
+    """실제 Step1Env 기반 train_fn.
+
+    cache_dir 는 반드시 호출부에서 명시적으로 전달한다 (dry-run 은 SMOKE_CACHE_DIR,
+    본 실행은 CACHE_DIR). 체크포인트를 여기 저장하므로, 전역 CACHE_DIR 을 암묵적으로
+    참조하면 dry-run 이 진짜 캐시 폴더에 체크포인트를 잘못 쓰거나 셀 5/6 실행 시점에
+    따라 저장 위치가 바뀌는 등 dry-run/본 실행이 서로 뒤섞일 위험이 있다.
+    """
+    assert cache_dir is not None, "cache_dir 를 명시적으로 전달하세요 (SMOKE_CACHE_DIR 또는 CACHE_DIR)"
     from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
     def train_fn(params: dict, timesteps: int, variant_id: int) -> float:
@@ -155,6 +189,12 @@ def make_train_fn_real(n_envs=1, handoff_dir=None):
         model.learn(total_timesteps=timesteps,
                     callback=WandbCallback(gradient_save_freq=0, verbose=0))
 
+        # 체크포인트 저장 — eval 이 실패해도 가중치는 보존된다. 소실 시 복구도
+        # 재평가도 불가능했던 문제(FAILURE_LOG.md 참조)의 대응. 크기/시간 비용은
+        # 무시 가능한 수준으로 실측됨: net_arch=[256,256] 고정(SKILL §3.1)이라
+        # variant 당 항상 ~0.87MB, ~22ms — Round 1 전체(18개) 합쳐도 ~16MB, ~0.4초.
+        model.save(f"{cache_dir}/stage{stage_n}_var{variant_id:03d}_model")
+
         # screening 평가: §11.0 spec 대로 75개 고정 시나리오(Easy 23/Medium 37/Hard 15).
         # 매 episode 마다 reset(seed=) 로 시나리오를 명시 고정한다 — 이전 버그
         # (생성자 seed= 만 주고 reset() 을 seed 없이 호출 → 20개가 전부 동일 시나리오)
@@ -182,13 +222,13 @@ def make_train_fn_real(n_envs=1, handoff_dir=None):
 
 # dry-run: 5K timestep
 orch_dry = RoundOrchestrator(
-    train_fn=make_train_fn_real(n_envs=1),
+    train_fn=make_train_fn_real(n_envs=1, cache_dir=SMOKE_CACHE_DIR),
     step_n=1,
     max_workers=1,           # 무료 Colab: ThreadPoolExecutor 는 GIL 경합으로 worker>1 이 더 느림
     stage1_timesteps=5_000,  # dry-run 전용
     stage2_timesteps=5_000,
-    optuna_storage=f"sqlite:///{PROJECT}/autoresearch_dry.db",
-    cache_dir=f"{CACHE_DIR}_dry",
+    optuna_storage=f"sqlite:///{_dry_db}",
+    cache_dir=SMOKE_CACHE_DIR,
 )
 
 print("=== dry-run 시작 (12 variants × 5K) ===")
@@ -202,7 +242,7 @@ print(f"importances: {r1_dry.importances}")
 # Stage 1 본 실행으로 넘어가지 말고 먼저 원인을 다시 확인할 것.
 import glob, json
 _dry_scores = []
-for _f in sorted(glob.glob(f"{CACHE_DIR}_dry/stage1_var*.json")):
+for _f in sorted(glob.glob(f"{SMOKE_CACHE_DIR}/stage1_var*.json")):
     _dry_scores.append(json.loads(open(_f).read())["metric"])
 _n_unique = len(set(round(s, 6) for s in _dry_scores))
 print(f"\n12개 variant score: {[round(s, 4) for s in _dry_scores]}")
@@ -225,11 +265,30 @@ Stage 1: 12 variants × 250K timestep.
 세션 끊기면 같은 셀 재실행 → 완료된 variant 캐시 재사용.
 학습 "도중" 끊긴 경우는 §8 의 복구 절차를 먼저 실행할 것.
 """
+import torch
+from pathlib import Path
 import optuna
 from autoresearch.optuna_study import (
     create_study, enqueue_round1_grid, ask_waiting_trials, register_grid_params,
 )
 from autoresearch.stage_runner import StageRunner
+
+# GPU 확인 (하드 스톱) — FAILURE_LOG.md 참조. 정말 CPU로 진행하려면 REQUIRE_GPU = False.
+REQUIRE_GPU = True
+if torch.cuda.is_available():
+    print(f"✅ GPU 사용 중: {torch.cuda.get_device_name(0)}")
+else:
+    print(
+        "⚠️ GPU 를 사용할 수 없습니다 — 이대로 진행하면 CPU 로 학습되어 250K 학습이 "
+        "수 배 이상 느려집니다 (실제 사고 사례: 7시간 동안 12개 중 8~9개만 완료).\n"
+        "   Colab 상단 메뉴 → 런타임 → 런타임 유형 변경 → 하드웨어 가속기 GPU 선택 후 "
+        "세션을 다시 시작하세요."
+    )
+    if REQUIRE_GPU:
+        raise RuntimeError(
+            "GPU 미사용 — REQUIRE_GPU=True(기본값) 라 중단합니다. "
+            "GPU 없이 계속하려면 이 셀 상단의 REQUIRE_GPU = False 로 바꾼 뒤 재실행하세요."
+        )
 
 OPTUNA_DB = f"sqlite:///{PROJECT}/autoresearch_round1.db"
 
@@ -250,6 +309,12 @@ assert len(variants) == 12, (
     "§8 '세션 끊김 복구 체크리스트'의 복구 절차를 먼저 실행하세요."
 )
 
+# 재개인지 신규 실행인지 즉시 알 수 있도록 캐시 히트 개수를 먼저 출력한다.
+_cache_hit_n = sum(
+    1 for i in range(len(variants)) if (Path(CACHE_DIR) / f"stage1_var{i:03d}.json").exists()
+)
+print(f"{len(variants)}개 중 {_cache_hit_n}개 캐시 재사용, {len(variants) - _cache_hit_n}개 신규 학습")
+
 def _tell_stage1(all_results, survivors):
     """Stage 1 탈락 variant 를 Stage 1 metric 으로 즉시 study.tell().
     이걸 안 하면 그 trial 은 RUNNING 에 멈춰 셀 7 importance 분석이 비어버린다.
@@ -267,7 +332,7 @@ def _tell_stage1(all_results, survivors):
                 print(f"  ⚠️ var{r.variant_id:03d} study.tell 실패: {e}")
 
 runner = StageRunner(
-    train_fn=make_train_fn_real(n_envs=1),
+    train_fn=make_train_fn_real(n_envs=1, cache_dir=CACHE_DIR),
     max_workers=1,               # ThreadPoolExecutor GIL 경합 회피 (상단 안내 참조)
     stage1_timesteps=250_000,
     stage2_timesteps=2_000_000,
@@ -303,8 +368,26 @@ Stage 2: Stage 1 생존자 × 2M timestep.
 from pathlib import Path
 import json
 import optuna
+import torch
 from autoresearch.optuna_study import create_study
 from autoresearch.stage_runner import StageRunner, VariantResult
+
+# GPU 확인 (하드 스톱) — FAILURE_LOG.md 참조. 정말 CPU로 진행하려면 REQUIRE_GPU = False.
+REQUIRE_GPU = True
+if torch.cuda.is_available():
+    print(f"✅ GPU 사용 중: {torch.cuda.get_device_name(0)}")
+else:
+    print(
+        "⚠️ GPU 를 사용할 수 없습니다 — 이대로 진행하면 CPU 로 학습되어 2M 학습이 "
+        "수 배 이상 느려집니다.\n"
+        "   Colab 상단 메뉴 → 런타임 → 런타임 유형 변경 → 하드웨어 가속기 GPU 선택 후 "
+        "세션을 다시 시작하세요."
+    )
+    if REQUIRE_GPU:
+        raise RuntimeError(
+            "GPU 미사용 — REQUIRE_GPU=True(기본값) 라 중단합니다. "
+            "GPU 없이 계속하려면 이 셀 상단의 REQUIRE_GPU = False 로 바꾼 뒤 재실행하세요."
+        )
 
 OPTUNA_DB = f"sqlite:///{PROJECT}/autoresearch_round1.db"
 study = create_study(step_n=1, round_n=1, storage=OPTUNA_DB)  # 기존 study 를 그대로 로드 (load_if_exists)
@@ -332,7 +415,7 @@ def _tell_stage2(all_results, best):
             print(f"  ⚠️ var{r.variant_id:03d} study.tell 실패: {e}")
 
 runner2 = StageRunner(
-    train_fn=make_train_fn_real(n_envs=1),
+    train_fn=make_train_fn_real(n_envs=1, cache_dir=CACHE_DIR),
     max_workers=1,                # ThreadPoolExecutor GIL 경합 회피 (상단 안내 참조)
     stage1_timesteps=250_000,
     stage2_timesteps=2_000_000,
@@ -381,8 +464,12 @@ print(f"→ wandb: https://wandb.ai/[user]/pipe-routing-rl")
 
 1. **셀 1** 재실행 (Drive 마운트 + 의존성)
 2. **셀 3** 재실행 (wandb login)
-3. 끊긴 셀부터 재실행 → 캐시 히트로 완료된 variant 자동 스킵
-4. `cache/round1/` 에 `stage1_var000.json` ~ `stage1_var011.json` (Stage 1), `stage2_var{V:03d}.json` (Stage 2, 생존자만) 로 진행 상황 확인
+3. 끊긴 셀부터 재실행 → 캐시 히트로 완료된 variant 자동 스킵. **셀 4(dry-run)는 매번
+   다시 실행할 필요 없다** — 이미 한 번 확인했다면 건너뛰고 바로 이어서 진행할 것.
+4. `cache/round1/` 에 `stage1_var000.json` ~ `stage1_var011.json` (Stage 1),
+   `stage2_var{V:03d}.json` (Stage 2, 생존자만) 로 진행 상황 확인. 같은 이름의
+   `stage{S}_var{V:03d}_model.zip` 은 해당 variant 의 학습된 모델 체크포인트다
+   (재평가/시각화용, 자동 삭제되지 않음 — FAILURE_LOG.md 참조).
 
 ```bash
 # 진행 상황 확인
@@ -429,3 +516,29 @@ os.remove(f"{PROJECT}/autoresearch_round1.db")   # Optuna DB만 삭제. cache/ro
 | **Round 1 합계** | **~15~18시간** | ⚠️ 최소 2세션 필요. 무료 tier 사용량 한도는 고정 12시간이 아니라 최근 사용량에 따라 변동하므로 3세션 이상 걸릴 수 있음 |
 
 > **팁**: Stage 1 완료 후 결과 저장 확인 (셀 5 마지막 줄) → Stage 2는 새 세션에서 시작해도 캐시로 복구됩니다. Stage 2 개별 variant(약 2.2시간)는 세션 한도보다 훨씬 짧으므로, 세션이 끊겨도 대부분 "variant 경계"에서 끊기고 §8 의 "학습 도중" 복구 절차까지 필요한 경우는 드뭅니다.
+
+---
+
+## 부록 A. ⚠️ 위험 작업 — cache/round1/ 전체 삭제
+
+**이 셀은 진짜 Stage 1/2 결과(JSON 결과 + 모델 체크포인트)를 되돌릴 수 없이 삭제합니다.**
+정상 실행 흐름(셀 0~8)에는 포함돼 있지 않고, "Run all" 로 노트북 전체를 실행해도
+안전하도록 아래 `CONFIRM` 문자열을 정확히 고쳐 쓰지 않으면 아무 것도 삭제되지
+않습니다. **정말로 Round 1 을 처음부터 다시 시작해야 할 때만** 사용하세요 — 세션
+끊김 복구는 §8 절차로 충분하며 이 셀이 필요하지 않습니다.
+
+```python
+import os
+import shutil
+
+CONFIRM = ""  # 정말 삭제하려면 이 줄만 CONFIRM = "DELETE ROUND1 CACHE" 로 고친 뒤 실행
+
+if CONFIRM == "DELETE ROUND1 CACHE":
+    shutil.rmtree(CACHE_DIR, ignore_errors=True)
+    _db_path = f"{PROJECT}/autoresearch_round1.db"
+    if os.path.exists(_db_path):
+        os.remove(_db_path)
+    print(f"삭제 완료: {CACHE_DIR}, {_db_path}")
+else:
+    print("삭제되지 않았습니다 — CONFIRM 문자열이 일치하지 않습니다 (의도된 안전장치입니다).")
+```
