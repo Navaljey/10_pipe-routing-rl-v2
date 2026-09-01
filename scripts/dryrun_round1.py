@@ -46,7 +46,11 @@ from training.train_step1 import (
 )
 
 DRY_TIMESTEPS = 5_000
-CACHE_DIR = _ROOT / "cache" / "dryrun_round1"
+# cache/round1_cli_smoke: 이 스크립트(로컬/CI 전용) 자체의 dry-run 캐시.
+# COLAB_GUIDE.md 의 cache/round1(진짜 결과)/cache/round1_smoke(Colab dry-run) 와는
+# 별개다 — 세 디렉터리 이름이 비슷해 혼동되기 쉬웠던 문제를 정리했다
+# (FAILURE_LOG.md 참조: cache/round1 자동 삭제 사고).
+CACHE_DIR = _ROOT / "cache" / "round1_cli_smoke"
 OPTUNA_DB_PATH = _ROOT / "autoresearch_dryrun.db"
 OPTUNA_DB = f"sqlite:///{OPTUNA_DB_PATH}"
 
