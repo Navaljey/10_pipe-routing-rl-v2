@@ -199,8 +199,15 @@ def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
         # 매 episode 마다 reset(seed=) 로 시나리오를 명시 고정한다 — 이전 버그
         # (생성자 seed= 만 주고 reset() 을 seed 없이 호출 → 20개가 전부 동일 시나리오)
         # 는 _evaluate_screening() 내부에서 이미 고쳐져 있다. FAILURE_LOG.md 참조.
+        # §9 컴퓨팅 비용 추정을 위해 평가 시간만 따로 잰다 — 학습 시간은
+        # StageRunner._run_one() 이 train_fn 호출 전체 소요시간에서 이 값을 빼서
+        # 자동 계산한다(autoresearch/stage_runner.py 참조).
+        import time
+        _eval_t0 = time.time()
         from training.train_step1 import _evaluate_screening
         result = _evaluate_screening(model, alpha, beta)
+        eval_time_sec = time.time() - _eval_t0
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
 
         wandb.log({
             "eval/success_rate": result["success_rate"],
@@ -209,13 +216,17 @@ def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
             "eval/success_rate_easy": result["by_difficulty"]["easy"]["success"] / result["by_difficulty"]["easy"]["n"],
             "eval/success_rate_medium": result["by_difficulty"]["medium"]["success"] / result["by_difficulty"]["medium"]["n"],
             "eval/success_rate_hard": result["by_difficulty"]["hard"]["success"] / result["by_difficulty"]["hard"]["n"],
+            "perf/eval_time_sec": eval_time_sec,
         })
         wandb.finish()
         vec_env.close()
-        # StageRunner/Optuna 는 이 반환값(score)으로 variant 순위를 매긴다.
+        # StageRunner/Optuna 는 튜플의 첫 원소(score)로 variant 순위를 매긴다.
         # score = success_rate - EPS*length_ratio (lexicographic, §11.2) — 상세는
         # training/train_step1.py 의 SCREENING_LENGTH_RATIO_EPS/CAP 주석 참조.
-        return result["score"]
+        # (score, eval_time_sec, gpu_name) tuple 반환은 §9 컴퓨팅 비용 추정 opt-in
+        # 이며, cache/round1/stage{S}_var{V:03d}.json 에 train_time_sec/eval_time_sec/
+        # gpu_name 으로 함께 저장된다 (autoresearch/stage_runner.py 참조).
+        return result["score"], eval_time_sec, gpu_name
 
     return train_fn
 
@@ -503,6 +514,133 @@ os.remove(f"{PROJECT}/autoresearch_round1.db")   # Optuna DB만 삭제. cache/ro
 - 실측: 12개 중 5개만 완료한 채 강제 중단 → DB 삭제 후 셀 5 재실행 → 정확히 나머지 7개만 재학습됨(캐시된 5개는 재학습 0회, train_fn 미호출). Stage 2 도중 강제 중단(생존자 6개 중 3개만 완료) 후 동일 절차로도 나머지 3개만 재학습되는 것을 확인함.
 
 **주의 — 이 복구가 통하지 않는 경우**: `cache/round1/` 디렉터리 자체를 지우면 캐시가 없으므로 12개(또는 남은 생존자) 전부 처음부터 재학습됩니다 — 이 경우 복구가 아니라 사실상 재시작입니다. **DB 삭제는 안전하지만 캐시 디렉터리 삭제는 그렇지 않습니다** — 절대 함께 지우지 마세요.
+
+---
+
+## 9. 컴퓨팅 비용 추정 리포트
+
+> Colab Pro 구독 검토용. `cache/round1/` 에 실측 GPU 시간이 얼마나 쌓였든(3개든 12개든)
+> 그 시점까지 측정된 값만으로 실행 가능합니다. 컴퓨팅 단위 잔량은 API로 읽을 수 없어
+> `UNITS_BEFORE`/`UNITS_AFTER`/`USD_PER_UNIT` 을 직접 입력해야 합니다(Colab 화면에서 확인).
+>
+> ⚠️ **Round 2/Step 1 예상치는 Round 2가 Round 1과 같은 2-stage 패턴을 따른다는 가정**
+> (§16.5.B: Stage 1 36 variants → 50% 생존 18개 → Stage 2 2M)에 기반합니다. grid 크기나
+> keep_ratio 가 바뀌면 이 추정도 다시 계산해야 합니다 — 출력에도 매번 이 가정을 함께 표시합니다.
+
+```python
+"""
+Round 1~Step 1 컴퓨팅 비용 추정 리포트.
+cache/round1/stage1_var*.json 에 기록된 실측 GPU 시간(train_time_sec + eval_time_sec)을
+기반으로 Stage 2 / Round 2 / Step 1 전체 예상 시간을 추정한다.
+셀 5(Stage 1)가 일부만 끝난 상태에서 실행해도 동작한다 (측정된 만큼만 집계).
+"""
+import glob
+import json
+from statistics import mean
+
+# ── (선택) 컴퓨팅 단위 환산 — Colab 화면에서 직접 확인한 값을 입력 ──────────
+# UNITS_BEFORE: 이 리포트가 집계하는 GPU 시간이 "시작되기 전" 시점의 잔량
+# UNITS_AFTER : 지금(이 셀 실행 시점) 잔량
+# 정확하려면 타이밍 기록이 있는 variant들의 학습이 시작되기 *전*에 UNITS_BEFORE 를 읽어야 함.
+UNITS_BEFORE = None   # 예: 152.3
+UNITS_AFTER  = None   # 예: 148.7
+USD_PER_UNIT = None   # 예: 0.0999 — Colab 결제 화면에 표시된 실제 단가(모르면 None 유지)
+
+records = [json.loads(open(_f).read()) for _f in sorted(glob.glob(f"{CACHE_DIR}/stage1_var*.json"))]
+timed = [r for r in records if r.get("train_time_sec") is not None and r.get("eval_time_sec") is not None]
+gpu_times = [r["train_time_sec"] + r["eval_time_sec"] for r in timed]
+
+print(f"=== Stage 1 캐시 {len(records)}개 중 시간 측정값 있는 variant: {len(timed)}개 ===")
+
+if not timed:
+    print("⚠️ 시간 측정값이 있는 variant가 아직 없습니다 — §9 적용 이전에 학습된 variant뿐이거나,")
+    print("   아직 새 코드로 학습된 variant가 없습니다. 최소 1개 이상 새로 학습된 뒤 다시 실행하세요.")
+else:
+    gpu_names = sorted({str(r.get("gpu_name")) for r in timed if r.get("gpu_name")})
+    print(f"GPU: {', '.join(gpu_names) if gpu_names else '(기록 없음)'}")
+
+    avg_t, max_t, min_t = mean(gpu_times), max(gpu_times), min(gpu_times)
+    print(f"\nvariant당 GPU 시간 — 평균 {avg_t/60:.1f}분 / 최대 {max_t/60:.1f}분 / 최소 {min_t/60:.1f}분")
+
+    def fmt_hours(sec):
+        return f"{sec/3600:.2f}시간"
+
+    stage1_measured_total = sum(gpu_times)
+    stage1_estimated_12 = avg_t * 12
+    stage2_per_variant = avg_t * 8                 # 2M / 250K = 8배
+    stage2_estimated = stage2_per_variant * 6       # Stage 1 생존자 6개
+    round2_stage1_estimated = avg_t * 36
+    round2_stage2_estimated = avg_t * 8 * 18         # ⚠️ 36 → 50% 생존 18개 가정
+    round2_estimated = round2_stage1_estimated + round2_stage2_estimated
+    round1_estimated = stage1_estimated_12 + stage2_estimated
+    step1_estimated = round1_estimated + round2_estimated
+
+    print(f"\nStage 1 누적 GPU 시간 — 실측 합계({len(timed)}개): {fmt_hours(stage1_measured_total)} "
+          f"/ 12개 전체 추정: {fmt_hours(stage1_estimated_12)}")
+    print(f"Stage 2 예상 (variant당 ×8: {fmt_hours(stage2_per_variant)}, 생존자 6개 합계): {fmt_hours(stage2_estimated)}")
+    print(f"Round 1 합계 예상: {fmt_hours(round1_estimated)}")
+    print(f"Round 2 예상 (36 variants): {fmt_hours(round2_estimated)}")
+    print(f"  └ Stage 1(36개): {fmt_hours(round2_stage1_estimated)} / Stage 2(18개×8배): {fmt_hours(round2_stage2_estimated)}")
+    print(f"Step 1 전체(Round 1~2 기준) 예상: {fmt_hours(step1_estimated)}")
+    print("\n⚠️ 전제: Round 2가 Round 1과 같은 2-stage 패턴(Stage1 36개 → 50% 생존 18개 → Stage2)을")
+    print("   따른다고 가정한 추정치입니다. grid 크기/keep_ratio 가 바뀌면 다시 계산해야 합니다.")
+
+    # Stage 2 가 이미 일부 실행됐다면, ×8 추정과 실측을 비교해 가정의 정확도를 검증할 수 있다.
+    stage2_records = [json.loads(open(_f).read()) for _f in sorted(glob.glob(f"{CACHE_DIR}/stage2_var*.json"))]
+    stage2_timed = [r for r in stage2_records if r.get("train_time_sec") is not None and r.get("eval_time_sec") is not None]
+    if stage2_timed:
+        stage2_actual_avg = mean(r["train_time_sec"] + r["eval_time_sec"] for r in stage2_timed)
+        print(f"\n(검증) Stage 2 실측 평균({len(stage2_timed)}개): {stage2_actual_avg/60:.1f}분 "
+              f"vs ×8 추정: {stage2_per_variant/60:.1f}분")
+
+    # ── 단위/달러 환산 ────────────────────────────────────────────────────
+    if UNITS_BEFORE is not None and UNITS_AFTER is not None:
+        consumed_units = UNITS_BEFORE - UNITS_AFTER
+        if stage1_measured_total > 0:
+            rate_per_hour = consumed_units / (stage1_measured_total / 3600)
+            print(f"\n=== 단위 환산 (소모 {consumed_units:.2f} units / "
+                  f"실측 {fmt_hours(stage1_measured_total)} 기준 → {rate_per_hour:.3f} units/시간) ===")
+
+            def to_units(sec):
+                return sec / 3600 * rate_per_hour
+
+            for label, sec in [
+                ("Stage 1 (12개 추정)", stage1_estimated_12),
+                ("Stage 2 (6개)", stage2_estimated),
+                ("Round 1 합계", round1_estimated),
+                ("Round 2 (36개, 2-stage 가정)", round2_estimated),
+                ("Step 1 전체(Round 1~2)", step1_estimated),
+            ]:
+                units = to_units(sec)
+                if USD_PER_UNIT is not None:
+                    print(f"  {label}: {units:.1f} units (${units * USD_PER_UNIT:.2f})")
+                else:
+                    print(f"  {label}: {units:.1f} units")
+            if USD_PER_UNIT is None:
+                print("  (USD_PER_UNIT 미입력 — 달러 환산 생략)")
+        else:
+            print("\n⚠️ 실측 GPU 시간 합계가 0이라 단위 환산이 불가능합니다.")
+    else:
+        print("\n(UNITS_BEFORE/UNITS_AFTER 미입력 — 시간만 출력)")
+
+    # ── PROGRESS.md 기록용 블록 ───────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("# 아래를 PROGRESS.md 에 그대로 붙여넣을 수 있습니다")
+    print("=" * 60)
+    print(f"""
+| 항목 | 값 |
+|---|---|
+| GPU | {', '.join(gpu_names) if gpu_names else '(기록 없음)'} |
+| 실측 variant 수 | {len(timed)}개 (Stage 1) |
+| variant당 평균 GPU 시간 | {avg_t/60:.1f}분 |
+| Stage 1 실측 합계 | {fmt_hours(stage1_measured_total)} ({len(timed)}개) |
+| Stage 1 전체 추정(12개) | {fmt_hours(stage1_estimated_12)} |
+| Stage 2 예상(6개, ×8) | {fmt_hours(stage2_estimated)} |
+| Round 1 합계 예상 | {fmt_hours(round1_estimated)} |
+| Round 2 예상(36개, ⚠️ 36→18 2-stage 가정) | {fmt_hours(round2_estimated)} |
+| Step 1 전체(Round 1~2) 예상 | {fmt_hours(step1_estimated)} |
+""")
+```
 
 ---
 

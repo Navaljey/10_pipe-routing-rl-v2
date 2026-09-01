@@ -20,6 +20,14 @@ train_fn 인터페이스:
       # timesteps: Stage 1=250K / Stage 2=2M
       # variant_id: logging 용 식별자
       # return: success_rate (0.0~1.0)
+
+  컴퓨팅 비용 추정(§9)을 쓰려면 대신 3-tuple 을 반환할 수 있다 (완전히 opt-in —
+  bare float 을 반환하는 기존 train_fn 은 아무 변경 없이 그대로 동작한다):
+  def train_fn(params, timesteps, variant_id) -> tuple[float, float | None, str | None]:
+      # return: (success_rate, eval_time_sec, gpu_name)
+      # eval_time_sec: 평가에 걸린 시간(초). train_time_sec 은 _run_one() 이
+      #   train_fn 호출 전체 소요시간에서 이 값을 빼서 자동 계산한다.
+      # gpu_name: torch.cuda.get_device_name(0) 등. GPU 없으면 "cpu".
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -48,6 +57,11 @@ class VariantResult(NamedTuple):
     metric: float       # success_rate (높을수록 좋음)
     timesteps: int
     stage: int          # 1 or 2
+    # 컴퓨팅 비용 추정용 (선택 필드, 하위호환 — 옛 5-field 캐시는 기본값 None 으로 로드됨).
+    # train_fn 이 (metric, eval_time_sec, gpu_name) tuple 을 반환할 때만 채워진다.
+    train_time_sec: float | None = None
+    eval_time_sec: float | None = None
+    gpu_name: str | None = None
 
 
 class StageRunner:
@@ -352,7 +366,21 @@ class StageRunner:
             return cached
 
         logger.debug("[stage_runner] var%03d 시작 stage=%d timesteps=%d", variant_id, timesteps, stage)
-        metric = self.train_fn(params, timesteps, variant_id)
+        t0 = time.time()
+        raw = self.train_fn(params, timesteps, variant_id)
+        total_elapsed = time.time() - t0
+
+        # train_fn 이 (metric, eval_time_sec, gpu_name) tuple 을 반환하면(§9 컴퓨팅
+        # 비용 추정용, opt-in) train_time_sec 을 총 소요시간에서 역산한다. 기존처럼
+        # bare float 을 반환하면 세 필드 모두 None — 완전히 하위호환.
+        if isinstance(raw, tuple):
+            metric, eval_time_sec, gpu_name = raw
+            train_time_sec = (
+                total_elapsed - eval_time_sec if eval_time_sec is not None else None
+            )
+        else:
+            metric, eval_time_sec, gpu_name, train_time_sec = raw, None, None, None
+
         logger.debug("[stage_runner] var%03d 완료 metric=%.4f", variant_id, metric)
         result = VariantResult(
             variant_id=variant_id,
@@ -360,6 +388,9 @@ class StageRunner:
             metric=metric,
             timesteps=timesteps,
             stage=stage,
+            train_time_sec=train_time_sec,
+            eval_time_sec=eval_time_sec,
+            gpu_name=gpu_name,
         )
         self._save_cached(result)
         return result

@@ -319,6 +319,112 @@ def test_survivors_cache_corrupted_falls_back_to_stage1(tmp_path):
     assert call_count[0] > 0
 
 
+# ─── 4b. 컴퓨팅 비용 추정 (train_fn 이 tuple 반환 시, opt-in) ────────────────
+
+def test_bare_float_train_fn_leaves_timing_fields_none(tmp_path):
+    """기존처럼 bare float 을 반환하면 timing/gpu 필드가 전부 None (하위호환)."""
+    runner = StageRunner(
+        train_fn=lambda p, t, v: 0.5,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    survivors = runner.run_stage1([{"v": 0}])
+    result = survivors[0]
+    assert result.train_time_sec is None
+    assert result.eval_time_sec is None
+    assert result.gpu_name is None
+
+
+def test_tuple_train_fn_populates_timing_and_gpu(tmp_path):
+    """train_fn 이 (metric, eval_time_sec, gpu_name) 을 반환하면 세 필드가 채워진다."""
+    import time as time_module
+
+    def train_fn(params, timesteps, variant_id):
+        time_module.sleep(0.05)  # "학습" 시간 흉내
+        return (0.9, 0.02, "Tesla T4")
+
+    runner = StageRunner(
+        train_fn=train_fn,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    survivors = runner.run_stage1([{"v": 0}])
+    result = survivors[0]
+    assert result.metric == 0.9
+    assert result.eval_time_sec == 0.02
+    assert result.gpu_name == "Tesla T4"
+    assert result.train_time_sec is not None
+    assert result.train_time_sec >= 0.05 - 0.02 - 0.01  # sleep 시간 근처 (여유 있게)
+
+
+def test_tuple_train_fn_eval_time_none_leaves_train_time_none(tmp_path):
+    """eval_time_sec 이 None 이면 train_time_sec 도 역산 불가하므로 None."""
+    runner = StageRunner(
+        train_fn=lambda p, t, v: (0.7, None, "cpu"),
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    result = runner.run_stage1([{"v": 0}])[0]
+    assert result.eval_time_sec is None
+    assert result.train_time_sec is None
+    assert result.gpu_name == "cpu"
+
+
+def test_timing_fields_round_trip_through_cache(tmp_path):
+    """timing/gpu 필드가 캐시 파일에 저장되고, 재실행 시(캐시 히트) 그대로 로드된다."""
+    runner = StageRunner(
+        train_fn=lambda p, t, v: (0.6, 0.01, "A100"),
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    runner.run_stage1([{"v": 0}])
+
+    # 새 StageRunner(캐시만 재사용, train_fn 은 호출되면 안 됨)
+    def fail_if_called(p, t, v):
+        raise AssertionError("캐시 히트인데 train_fn 이 호출됨")
+
+    runner2 = StageRunner(
+        train_fn=fail_if_called,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    result = runner2.run_stage1([{"v": 0}])[0]
+    assert result.gpu_name == "A100"
+    assert result.eval_time_sec == 0.01
+    assert result.train_time_sec is not None
+
+
+def test_old_5field_cache_json_loads_with_none_timing(tmp_path):
+    """PR #5 이전 형식(5-field, timing 필드 없음) 캐시 JSON 이 여전히 정상 로드된다."""
+    import json as json_module
+
+    old_style = {
+        "variant_id": 0, "params": {"v": 0}, "metric": 0.4,
+        "timesteps": 10, "stage": 1,
+    }
+    (tmp_path / "stage1_var000.json").write_text(json_module.dumps(old_style), encoding="utf-8")
+
+    def fail_if_called(p, t, v):
+        raise AssertionError("캐시 히트인데 train_fn 이 호출됨")
+
+    runner = StageRunner(
+        train_fn=fail_if_called,
+        stage1_timesteps=10,
+        stage2_timesteps=20,
+        cache_dir=tmp_path,
+    )
+    result = runner.run_stage1([{"v": 0}])[0]
+    assert result.metric == 0.4
+    assert result.train_time_sec is None
+    assert result.eval_time_sec is None
+    assert result.gpu_name is None
+
+
 # ─── 5. max_workers 경고 ─────────────────────────────────────────────────────
 
 def test_max_workers_over_limit_logs_warning(caplog):
