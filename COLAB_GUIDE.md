@@ -520,7 +520,9 @@ os.remove(f"{PROJECT}/autoresearch_round1.db")   # Optuna DB만 삭제. cache/ro
 ## 9. 컴퓨팅 비용 추정 리포트
 
 > Colab Pro 구독 검토용. `cache/round1/` 에 실측 GPU 시간이 얼마나 쌓였든(3개든 12개든)
-> 그 시점까지 측정된 값만으로 실행 가능합니다. 컴퓨팅 단위 잔량은 API로 읽을 수 없어
+> 그 시점까지 측정된 값만으로 실행 가능합니다. **독립 실행 가능** — 셀 1(Drive 마운트)만
+> 먼저 실행되어 있으면 되고, 같은 세션에서 셀 4/5/6 을 다시 돌릴 필요는 없습니다.
+> 컴퓨팅 단위 잔량은 API로 읽을 수 없어
 > `UNITS_BEFORE`/`UNITS_AFTER`/`USD_PER_UNIT` 을 직접 입력해야 합니다(Colab 화면에서 확인).
 >
 > ⚠️ **Round 2/Step 1 예상치는 Round 2가 Round 1과 같은 2-stage 패턴을 따른다는 가정**
@@ -533,10 +535,16 @@ Round 1~Step 1 컴퓨팅 비용 추정 리포트.
 cache/round1/stage1_var*.json 에 기록된 실측 GPU 시간(train_time_sec + eval_time_sec)을
 기반으로 Stage 2 / Round 2 / Step 1 전체 예상 시간을 추정한다.
 셀 5(Stage 1)가 일부만 끝난 상태에서 실행해도 동작한다 (측정된 만큼만 집계).
+독립 실행 가능 — 셀 1(Drive 마운트, PROJECT 정의)만 먼저 실행되어 있으면 되고,
+같은 세션에서 셀 4/5/6 을 다시 돌릴 필요는 없다.
 """
 import glob
 import json
 from statistics import mean
+
+if "PROJECT" not in globals():
+    raise RuntimeError("PROJECT 가 정의되지 않았습니다 — 먼저 셀 1(환경 설정)을 실행하세요.")
+CACHE_DIR = f"{PROJECT}/cache/round1"
 
 # ── (선택) 컴퓨팅 단위 환산 — Colab 화면에서 직접 확인한 값을 입력 ──────────
 # UNITS_BEFORE: 이 리포트가 집계하는 GPU 시간이 "시작되기 전" 시점의 잔량
