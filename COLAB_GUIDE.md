@@ -520,7 +520,9 @@ os.remove(f"{PROJECT}/autoresearch_round1.db")   # Optuna DB만 삭제. cache/ro
 ## 9. 컴퓨팅 비용 추정 리포트
 
 > Colab Pro 구독 검토용. `cache/round1/` 에 실측 GPU 시간이 얼마나 쌓였든(3개든 12개든)
-> 그 시점까지 측정된 값만으로 실행 가능합니다. 컴퓨팅 단위 잔량은 API로 읽을 수 없어
+> 그 시점까지 측정된 값만으로 실행 가능합니다. **독립 실행 가능** — 셀 1(Drive 마운트)만
+> 먼저 실행되어 있으면 되고, 같은 세션에서 셀 4/5/6 을 다시 돌릴 필요는 없습니다.
+> 컴퓨팅 단위 잔량은 API로 읽을 수 없어
 > `UNITS_BEFORE`/`UNITS_AFTER`/`USD_PER_UNIT` 을 직접 입력해야 합니다(Colab 화면에서 확인).
 >
 > ⚠️ **Round 2/Step 1 예상치는 Round 2가 Round 1과 같은 2-stage 패턴을 따른다는 가정**
@@ -533,10 +535,16 @@ Round 1~Step 1 컴퓨팅 비용 추정 리포트.
 cache/round1/stage1_var*.json 에 기록된 실측 GPU 시간(train_time_sec + eval_time_sec)을
 기반으로 Stage 2 / Round 2 / Step 1 전체 예상 시간을 추정한다.
 셀 5(Stage 1)가 일부만 끝난 상태에서 실행해도 동작한다 (측정된 만큼만 집계).
+독립 실행 가능 — 셀 1(Drive 마운트, PROJECT 정의)만 먼저 실행되어 있으면 되고,
+같은 세션에서 셀 4/5/6 을 다시 돌릴 필요는 없다.
 """
 import glob
 import json
 from statistics import mean
+
+if "PROJECT" not in globals():
+    raise RuntimeError("PROJECT 가 정의되지 않았습니다 — 먼저 셀 1(환경 설정)을 실행하세요.")
+CACHE_DIR = f"{PROJECT}/cache/round1"
 
 # ── (선택) 컴퓨팅 단위 환산 — Colab 화면에서 직접 확인한 값을 입력 ──────────
 # UNITS_BEFORE: 이 리포트가 집계하는 GPU 시간이 "시작되기 전" 시점의 잔량
@@ -640,6 +648,184 @@ else:
 | Round 2 예상(36개, ⚠️ 36→18 2-stage 가정) | {fmt_hours(round2_estimated)} |
 | Step 1 전체(Round 1~2) 예상 | {fmt_hours(step1_estimated)} |
 """)
+```
+
+## 10. var008 3-seed 분산 체크
+
+> Stage 1 상위 생존자들의 score 차이가 seed 편차보다 큰 신호인지 판별하기 위한 진단 셀
+> (PROGRESS.md 2026-09-01 entry 참조). **독립 실행 가능** — 셀 1(Drive 마운트)과 Stage 1
+> (셀 5) 완료만 전제로 하며, 같은 세션에서 셀 4/5/6 을 다시 돌릴 필요는 없습니다.
+>
+> `cache/round1/`(진짜 Stage 1/2 결과)은 이 셀에서 **읽기만** 하고 절대 쓰지 않습니다 —
+> 결과는 전부 별도 디렉터리 `cache/round1_seedcheck/` 에 저장됩니다.
+
+```python
+"""
+var008(α=2.0, β=0.3) 3-seed 분산 체크 — 250K 신규 2개 + 기존 var008 결과 재사용.
+목적: Stage 1 상위 생존자 간 score 차이가 seed 편차보다 큰 신호인지 판별
+(PROGRESS.md 2026-09-01 entry 참조).
+
+결과는 cache/round1_seedcheck/ 에 저장 — cache/round1/(진짜 Stage 1/2 결과)은
+이 셀에서 오직 읽기만 하고 절대 쓰지 않는다.
+
+seed 가 실제로 바꾸는 것: make_env_fn() 의 seed 는 Step1Env 생성자로 들어가는데,
+"train" 모드에서는 _train_seed_counter 가 항상 150000 부터 시작하는 기존 이슈
+(PROGRESS.md 참조) 때문에 3개 실행의 시나리오(미로) "순서" 자체는 동일하다.
+대신 매 episode 의 start_dir_idx/goal_dir_idx(강제 출발/목표 방향)는 seed 로
+초기화되는 _episode_rng 에서 뽑히므로 seed 마다 확실히 달라진다 — 아래 사전 점검이
+학습 시작 전에 이를 직접 확인/assert 한다. 여기에 더해 build_model() 이 MaskablePPO 를
+seed= 없이 생성하므로(training/train_step1.py) PPO 자체의 신경망 초기화/rollout
+샘플링도 매 실행마다 시드되지 않은 무작위성을 갖는다 — 두 가지 독립적인 변동 요인이
+있어 "seed 를 바꿔도 결과가 우연히 완전히 같다"는 시나리오는 사실상 배제된다.
+"""
+import json
+import time
+from pathlib import Path
+import torch
+
+if "PROJECT" not in globals():
+    raise RuntimeError("PROJECT 가 정의되지 않았습니다 — 먼저 셀 1(환경 설정)을 실행하세요.")
+CACHE_DIR = f"{PROJECT}/cache/round1"
+
+from training.train_step1 import make_env_fn, build_model
+from envs.step1_env import Step1Env
+
+# GPU 확인 (하드 스톱) — 셀 5/6 과 동일
+REQUIRE_GPU = True
+if torch.cuda.is_available():
+    print(f"✅ GPU 사용 중: {torch.cuda.get_device_name(0)}")
+else:
+    print("⚠️ GPU 를 사용할 수 없습니다 — CPU 로 진행하면 수 배 느려집니다.")
+    if REQUIRE_GPU:
+        raise RuntimeError(
+            "GPU 미사용 — REQUIRE_GPU=True(기본값) 라 중단합니다. "
+            "GPU 없이 계속하려면 이 셀 상단의 REQUIRE_GPU = False 로 바꾸세요."
+        )
+
+N_SEEDS = 3   # 애매하면(range 가 판별 기준 근처) 5 로 늘려 재실행 가능
+SEEDCHECK_CACHE_DIR = f"{PROJECT}/cache/round1_seedcheck"   # cache/round1/ 과 절대 안 겹침
+Path(SEEDCHECK_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+VAR008_ALPHA, VAR008_BETA = 2.0, 0.3   # Stage 1 var008 파라미터
+
+# ── seed 사전 점검: 신규 슬롯들이 실제로 다른 방향 시퀀스를 타는지 학습 전에 확인 ──
+def _direction_sequence(seed, n=5):
+    env = Step1Env(mode="train", difficulty="medium", seed=seed)
+    seq = []
+    for _ in range(n):
+        env.reset()
+        seq.append((env.start_dir_idx, env.goal_dir_idx))
+    env.close()
+    return seq
+
+_new_slot_ids = list(range(1, N_SEEDS))   # slot 0 = var008 재사용, 1..N-1 = 신규
+_seeds = {slot: 150000 + slot * 100 for slot in _new_slot_ids}
+print(f"=== 신규 슬롯 seed: {_seeds} (참고: var008 원래 seed = 150800, 재사용만 함) ===")
+assert len(set(_seeds.values())) == len(_seeds), "신규 슬롯 seed 가 서로 겹칩니다 — 버그"
+
+_dir_seqs = {slot: _direction_sequence(seed) for slot, seed in _seeds.items()}
+for slot, seq in _dir_seqs.items():
+    print(f"  slot {slot} (seed={_seeds[slot]}) 방향 시퀀스 샘플: {seq}")
+_unique_seqs = {tuple(s) for s in _dir_seqs.values()}
+assert len(_unique_seqs) == len(_dir_seqs), (
+    "신규 슬롯들의 방향 시퀀스가 동일합니다 — seed 가 실제로 안 바뀌고 있다는 뜻이므로 "
+    "학습을 시작하지 말고 원인을 먼저 확인하세요."
+)
+print("✅ 신규 슬롯들의 학습 조건(강제 방향 시퀀스)이 서로 다름을 확인 — 학습 진행\n")
+
+# ── 1) 기존 var008 결과를 slot 0 으로 재사용 (재학습하지 않음) ──────────────
+var008_path = Path(CACHE_DIR) / "stage1_var008.json"
+assert var008_path.exists(), (
+    f"{var008_path} 를 찾을 수 없습니다 — Stage 1(셀 5)이 완료된 상태에서 실행하세요."
+)
+slot0_path = Path(SEEDCHECK_CACHE_DIR) / "stage1_var000.json"
+if not slot0_path.exists():
+    var008_data = json.loads(var008_path.read_text())
+    seed1_data = dict(var008_data)
+    seed1_data["variant_id"] = 0   # 이 리스트 안에서의 위치로 재매핑 (α/β 값 자체는 그대로)
+    slot0_path.write_text(json.dumps(seed1_data), encoding="utf-8")
+print(f"slot 0(기존 var008 재사용): score={json.loads(slot0_path.read_text())['metric']:.4f}")
+
+# ── 2) train_fn — make_train_fn_real() 과 거의 동일하지만 wandb run 이름을 seedcheck
+#    전용으로 분리한다(실제 Stage1/2 run 이름과 겹치면 wandb 대시보드에서 혼동되므로
+#    의도적으로 별도 구현 — make_train_fn_real() 자체는 건드리지 않는다). ─────────
+def make_seedcheck_train_fn(cache_dir):
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+
+    def train_fn(params: dict, timesteps: int, variant_id: int) -> tuple[float, float, str]:
+        alpha, beta = params["alpha"], params["beta"]
+        vec_env = DummyVecEnv([make_env_fn(150000 + variant_id * 100, alpha, beta, "medium")])
+        vec_env = VecMonitor(vec_env)
+        model = build_model(vec_env, lr=3e-4, n_steps=2048, batch_size=64, ent_coef=0.01)
+
+        import wandb
+        from wandb.integration.sb3 import WandbCallback
+        wandb.init(
+            project="pipe-routing-rl",
+            name=f"step1_round1_seedcheck_var008_slot{variant_id}",
+            config={"alpha": alpha, "beta": beta, "purpose": "seed_variance_check",
+                    "base_variant": "var008", "seed": 150000 + variant_id * 100},
+            tags=["step1", "round1", "seedcheck"],
+            reinit=True,
+        )
+        model.learn(total_timesteps=timesteps,
+                    callback=WandbCallback(gradient_save_freq=0, verbose=0))
+        model.save(f"{cache_dir}/stage1_var{variant_id:03d}_model")
+
+        t0 = time.time()
+        from training.train_step1 import _evaluate_screening
+        result = _evaluate_screening(model, alpha, beta)
+        eval_time_sec = time.time() - t0
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+
+        wandb.log({"eval/success_rate": result["success_rate"], "eval/score": result["score"]})
+        wandb.finish()
+        vec_env.close()
+        return result["score"], eval_time_sec, gpu_name
+
+    return train_fn
+
+# ── 3) N_SEEDS 개 모두 같은 (α, β) — stage1_keep_ratio=1.0 으로 전부 유지 ──────
+from autoresearch.stage_runner import StageRunner
+runner = StageRunner(
+    train_fn=make_seedcheck_train_fn(SEEDCHECK_CACHE_DIR),
+    max_workers=1,
+    stage1_timesteps=250_000,
+    stage1_keep_ratio=1.0,   # screening 이 아니라 분산 측정이므로 탈락 없음
+    cache_dir=SEEDCHECK_CACHE_DIR,
+)
+
+variants = [{"alpha": VAR008_ALPHA, "beta": VAR008_BETA}] * N_SEEDS
+_hit = sum(
+    1 for i in range(len(variants))
+    if (Path(SEEDCHECK_CACHE_DIR) / f"stage1_var{i:03d}.json").exists()
+)
+print(f"\n{len(variants)}개 중 {_hit}개 캐시 재사용, {len(variants) - _hit}개 신규 학습 "
+      f"(예상 추가 소요: 최대 {(len(variants) - _hit) * 50}분)")
+
+results = runner.run_stage1(variants)   # keep_ratio=1.0 이라 전부 반환됨
+scores = sorted(r.metric for r in results)
+
+# ── 4) 통계 + 판정 ──────────────────────────────────────────────────────────
+import statistics
+
+mean_score = statistics.mean(scores)
+std_score = statistics.stdev(scores) if len(scores) > 1 else 0.0
+range_score = max(scores) - min(scores)
+THRESHOLD = 1 / 75   # Stage 1 상위4-하위2 실측 차이(=1 success/75) 와 동일 기준
+
+print(f"\n=== var008 {len(scores)}-seed 결과: {[f'{s:.4f}' for s in scores]} ===")
+print(f"평균: {mean_score:.4f} / 표본표준편차: {std_score:.4f} / range(max-min): {range_score:.4f}")
+print(f"판별 기준(1/75): {THRESHOLD:.4f}  ※ range 기준으로 비교 (원래 신호도 max-min 형태였음)")
+
+if range_score > THRESHOLD:
+    print(f"\n결론: range({range_score:.4f}) > {THRESHOLD:.4f} → 현재 Stage 1 순위는 노이즈 "
+          "지배적일 가능성이 큽니다. Stage 2 를 이 순위 그대로 투입하는 근거가 약합니다 — "
+          "임의 조합(예: var008) 고정 후 Round 2(w1·w2·w3)로 이동을 권장합니다.")
+else:
+    print(f"\n결론: range({range_score:.4f}) < {THRESHOLD:.4f} → 상위권 동률이 noise 안에서도 "
+          "유지될 가능성이 있습니다. 축소 Stage 2(상위 2~3개)로 진행을 고려할 수 있습니다.")
+    print("(range 가 기준에 가깝다면 N_SEEDS = 5 로 늘려 재실행해 더 확실히 판별하세요.)")
 ```
 
 ---
