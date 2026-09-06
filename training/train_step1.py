@@ -114,8 +114,13 @@ def _get_git_commit() -> str:
 
 
 def make_env_fn(seed: int, alpha: float, beta: float,
-                difficulty: str, mode: str = "train"):
-    """DummyVecEnv / SubprocVecEnv 용 env factory."""
+                difficulty: str, mode: str = "train",
+                w1: float = DEFAULT_W1, w2: float = DEFAULT_W2, w3: float = DEFAULT_W3):
+    """DummyVecEnv / SubprocVecEnv 용 env factory.
+
+    w1/w2/w3 는 기본값이 Step1Env 의 모듈 상수와 동일하므로, 호출부에서 명시
+    안 하면 기존과 동일하게 동작한다 (2026-09 FAILURE_LOG: w1/w2/w3 미배선 발견).
+    """
     def _make():
         return Step1Env(
             mode=mode,
@@ -123,6 +128,9 @@ def make_env_fn(seed: int, alpha: float, beta: float,
             seed=seed,
             alpha=alpha,
             beta=beta,
+            w1=w1,
+            w2=w2,
+            w3=w3,
         )
     return _make
 
@@ -195,7 +203,8 @@ def run_training(args: argparse.Namespace) -> dict:
 
     # 환경 생성
     vec_env = DummyVecEnv([
-        make_env_fn(args.seed + i, args.alpha, args.beta, args.difficulty)
+        make_env_fn(args.seed + i, args.alpha, args.beta, args.difficulty,
+                    w1=args.w1, w2=args.w2, w3=args.w3)
         for i in range(args.n_envs)
     ])
     vec_env = VecMonitor(vec_env)

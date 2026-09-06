@@ -235,3 +235,81 @@ def test_reward_no_negative_without_events(env: ConcreteStep1Env) -> None:
     _, r, done, trunc, _ = env.step(2)  # step 2
     if not done and not trunc:
         assert r < 0  # at least -W1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. w1/w2/w3 인스턴스 오버라이드 배선 검증 (2026-09 FAILURE_LOG)
+#
+# 이전에는 Step1Env.__init__ 이 w1/w2/w3 를 받지 않아 _calc_reward() 가 항상
+# 모듈 상수 W1/W2/W3 만 참조했다 — autoresearch Round 2 (w1/w2/w3 sweep) 가
+# 코드상으로는 값을 넘기는 것처럼 보여도 실제로는 아무 효과가 없는 no-op 이었다.
+# 아래 테스트는 (a) 기본값이 여전히 모듈 상수와 동일함(회귀 방지)과,
+# (b) 명시적으로 다른 값을 넘기면 동일 seed/동일 state 에서도 reward 가
+# 실제로 달라짐(배선이 살아있음)을 둘 다 확인한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_default_w1_w2_w3_match_module_constants(env: ConcreteStep1Env) -> None:
+    """w1/w2/w3 를 명시하지 않으면 인스턴스 속성이 모듈 상수와 정확히 같다."""
+    assert env.w1 == W1
+    assert env.w2 == W2
+    assert env.w3 == W3
+
+
+def test_w1_override_changes_length_penalty() -> None:
+    """동일 seed·동일 action 시퀀스에서 w1 만 바꾸면 reward 가 실제로 달라진다."""
+    env_lo = ConcreteStep1Env(seed=0, w1=0.05)
+    env_hi = ConcreteStep1Env(seed=0, w1=0.5)
+    env_lo.reset(seed=0)
+    env_hi.reset(seed=0)
+    env_lo.step(2)  # step 1 (direction bonus/penalty 는 w1 과 무관하므로 양쪽 동일)
+    env_hi.step(2)
+    _, r_lo, done_lo, trunc_lo, _ = env_lo.step(2)  # step 2: neutral, length penalty만
+    _, r_hi, done_hi, trunc_hi, _ = env_hi.step(2)
+    assert not done_lo and not trunc_lo
+    assert not done_hi and not trunc_hi
+    assert r_lo == pytest.approx(-0.05)
+    assert r_hi == pytest.approx(-0.5)
+    assert r_lo != pytest.approx(r_hi)
+
+
+def test_w2_override_changes_collision_penalty() -> None:
+    """동일 seed·동일 wall 배치에서 w2 만 바꾸면 collision reward 가 달라진다."""
+
+    class _WallEnv(ConcreteStep1Env):
+        def _sample_scenario(self) -> None:
+            super()._sample_scenario()
+            self.occupancy[6, 5, 5] = True  # agent(5,5,5) 의 +X neighbor
+
+    env_lo = _WallEnv(seed=42, w2=1.0)
+    env_hi = _WallEnv(seed=42, w2=5.0)
+    env_lo.reset(seed=0)
+    env_hi.reset(seed=0)
+    env_lo._step_count = 5
+    env_hi._step_count = 5
+    _, r_lo, done_lo, _, info_lo = env_lo.step(0)  # +X → wall → collision
+    _, r_hi, done_hi, _, info_hi = env_hi.step(0)
+    assert done_lo and done_hi
+    assert info_lo["termination"] == info_hi["termination"] == "collision"
+    assert r_lo == pytest.approx(-env_lo.w1 - 1.0)
+    assert r_hi == pytest.approx(-env_hi.w1 - 5.0)
+    assert r_lo != pytest.approx(r_hi)
+
+
+def test_w3_override_changes_goal_bonus() -> None:
+    """동일 seed·동일 goal 도달 조건에서 w3 만 바꾸면 goal bonus 가 달라진다."""
+    env_lo = ConcreteStep1Env(seed=0, w3=20.0)
+    env_hi = ConcreteStep1Env(seed=0, w3=100.0)
+    for e in (env_lo, env_hi):
+        e.reset(seed=0)
+        e.agent_cell = np.array([24, 25, 25], dtype=np.int32)
+        e.goal_cell = np.array([25, 25, 25], dtype=np.int32)
+        e.goal_dir_idx = 0  # +X, action=0 과 일치 → wrong_goal_dir_penalty 없음
+        e._step_count = 10
+    _, r_lo, done_lo, _, info_lo = env_lo.step(0)
+    _, r_hi, done_hi, _, info_hi = env_hi.step(0)
+    assert done_lo and done_hi
+    assert info_lo["termination"] == info_hi["termination"] == "goal_reached"
+    assert r_lo == pytest.approx(-env_lo.w1 + 20.0)
+    assert r_hi == pytest.approx(-env_hi.w1 + 100.0)
+    assert r_lo != pytest.approx(r_hi)

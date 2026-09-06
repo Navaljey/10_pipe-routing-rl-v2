@@ -95,6 +95,12 @@ class Step1Env(BaseEnv):
     gamma_ppo :
         PPO discount factor. gamma_PBS == gamma_PPO 조건 4 강제.
         autoresearch sweep 시 gamma 변경하면 이 값도 함께 변경.
+    w1, w2, w3 :
+        Baseline reward 가중치 (CLAUDE.md §16.3.1, autoresearch Round 2 sweep 대상).
+        기본값은 모듈 상수 W1/W2/W3 와 동일 — 명시적으로 넘기지 않으면 기존과
+        동일하게 동작한다 (2026-09 FAILURE_LOG: 이전에는 이 값들이 인스턴스에
+        전달될 방법 자체가 없어 항상 모듈 상수만 쓰였다).
+        w4, w5 는 §12.4 고정값이라 sweep 대상이 아니며 계속 모듈 상수를 쓴다.
     **kwargs :
         BaseEnv 로 전달 (space_size_mm, max_steps, seed).
     """
@@ -106,6 +112,9 @@ class Step1Env(BaseEnv):
         alpha: float = 1.0,
         beta: float = 0.1,
         gamma_ppo: float = 0.99,
+        w1: float = W1,
+        w2: float = W2,
+        w3: float = W3,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
@@ -119,6 +128,9 @@ class Step1Env(BaseEnv):
         self.difficulty = difficulty
         self.alpha = alpha
         self.beta = beta
+        self.w1 = w1
+        self.w2 = w2
+        self.w3 = w3
 
         # Scenario generator v1.0.0
         self._generator = ScenarioGeneratorV1()
@@ -359,13 +371,13 @@ class Step1Env(BaseEnv):
 
         PBS shaping 은 BaseEnv.step() 에서 _calc_shape() 로 별도 추가.
         """
-        reward = -W1  # length penalty (매 스텝)
+        reward = -self.w1  # length penalty (매 스텝)
 
         if terminated and self._termination_reason in ("collision", "out_of_bounds"):
-            reward -= W2
+            reward -= self.w2
 
         if self._termination_reason == "goal_reached":
-            reward += W3
+            reward += self.w3
 
         if self._step_count == 1:
             reward += W4 if action == self.start_dir_idx else -W5

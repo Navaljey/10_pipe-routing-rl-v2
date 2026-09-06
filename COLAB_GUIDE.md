@@ -158,12 +158,16 @@ def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
     def train_fn(params: dict, timesteps: int, variant_id: int) -> float:
         alpha = params.get("alpha", 1.0)
         beta  = params.get("beta", 0.1)
+        # w1/w2/w3 는 make_env_fn() 을 거쳐 Step1Env(w1=..., w2=..., w3=...) 로
+        # 실제 전달된다 (2026-09 FAILURE_LOG: 이전에는 여기서 읽기만 하고
+        # make_env_fn() 호출에 안 넘겨서 Round 2 sweep 이 전부 no-op 이었다).
         w1    = params.get("w1", 0.1)
         w2    = params.get("w2", 2.0)
         w3    = params.get("w3", 50.0)
 
         vec_env = DummyVecEnv([
-            make_env_fn(150000 + variant_id * 100 + i, alpha, beta, "medium")
+            make_env_fn(150000 + variant_id * 100 + i, alpha, beta, "medium",
+                        w1=w1, w2=w2, w3=w3)
             for i in range(n_envs)
         ])
         vec_env = VecMonitor(vec_env)
@@ -826,6 +830,132 @@ else:
     print(f"\n결론: range({range_score:.4f}) < {THRESHOLD:.4f} → 상위권 동률이 noise 안에서도 "
           "유지될 가능성이 있습니다. 축소 Stage 2(상위 2~3개)로 진행을 고려할 수 있습니다.")
     print("(range 가 기준에 가깝다면 N_SEEDS = 5 로 늘려 재실행해 더 확실히 판별하세요.)")
+```
+
+---
+
+## 11. w1/w2/w3 배선 수정 검증 (var008 1회 재현 체크)
+
+> 2026-09 FAILURE_LOG: w1/w2/w3 가 CLI 인자·params dict 에는 있었지만 실제 보상 계산
+> (`Step1Env._calc_reward()`)에는 한 번도 전달되지 않던 버그를 수정했다 (envs/step1_env.py,
+> training/train_step1.py::make_env_fn(), 본 문서 §5/§6 의 `make_train_fn_real`). 수정은
+> 하위호환(기본값 = 기존 모듈 상수) 방식이라 코드 레벨 테스트(`tests/test_reward_baseline.py`,
+> `tests/test_train_step1_smoke.py`)로는 "기본값을 쓰면 이전과 동일한 함수" 임을 이미
+> 확인했지만, GPU 가 없는 환경(Claude Code CLI)에서는 실제 250K 학습 재현까지는 못 했다.
+> 이 셀은 그 마지막 경험적 확인 단계 — **수정된 코드로 var008 을 1회(250K) 다시 학습해
+> 기존 cache/round1/ 결과 및 §10 3-seed 노이즈 대역과 비교**한다.
+>
+> `cache/round1/`, `cache/round1_seedcheck/` 은 이 셀에서 **읽기만** 하고 절대 쓰지
+> 않는다 — 결과는 `cache/round1_wiring_check/` 전용 디렉터리에 저장한다.
+
+```python
+"""
+w1/w2/w3 배선 수정 검증 — var008(α=2.0, β=0.3, w1=0.1/w2=2.0/w3=50.0 기본값)을
+수정된 코드로 1회(250K) 재학습해 기존 결과와 비교.
+
+판정: 새 score 가 기존 var008 대비 §10 에서 측정한 노이즈 range(0.0135) 안에 있으면
+"배선 수정이 기존 결과를 재현함(회귀 없음)"으로 판정한다. 밖에 있으면 배선 수정
+자체가 아닌 다른 변화(예: 코드의 다른 부분이 의도치 않게 함께 바뀜)가 있었는지
+먼저 의심해야 한다.
+"""
+import json
+import time
+from pathlib import Path
+import torch
+
+if "PROJECT" not in globals():
+    raise RuntimeError("PROJECT 가 정의되지 않았습니다 — 먼저 셀 1(환경 설정)을 실행하세요.")
+CACHE_DIR = f"{PROJECT}/cache/round1"
+SEEDCHECK_CACHE_DIR = f"{PROJECT}/cache/round1_seedcheck"
+WIRING_CHECK_CACHE_DIR = f"{PROJECT}/cache/round1_wiring_check"   # 전용 디렉터리 — round1/, round1_seedcheck/ 절대 안 건드림
+Path(WIRING_CHECK_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+from training.train_step1 import make_env_fn, build_model, DEFAULT_W1, DEFAULT_W2, DEFAULT_W3
+
+# GPU 확인 (하드 스톱) — 셀 5/6/10 과 동일
+REQUIRE_GPU = True
+if torch.cuda.is_available():
+    print(f"✅ GPU 사용 중: {torch.cuda.get_device_name(0)}")
+else:
+    print("⚠️ GPU 를 사용할 수 없습니다 — CPU 로 진행하면 수 배 느려집니다.")
+    if REQUIRE_GPU:
+        raise RuntimeError(
+            "GPU 미사용 — REQUIRE_GPU=True(기본값) 라 중단합니다. "
+            "GPU 없이 계속하려면 이 셀 상단의 REQUIRE_GPU = False 로 바꾸세요."
+        )
+
+VAR008_ALPHA, VAR008_BETA = 2.0, 0.3
+THRESHOLD = 1 / 75   # §10 에서 확정한 측정 한계(0.0135)와 비교할 기준값
+
+# ── 기존 결과 로드 (비교 기준선) ────────────────────────────────────────────
+var008_path = Path(CACHE_DIR) / "stage1_var008.json"
+assert var008_path.exists(), f"{var008_path} 를 찾을 수 없습니다 — Stage 1(셀 5)이 완료된 상태에서 실행하세요."
+var008_score = json.loads(var008_path.read_text())["metric"]
+print(f"기존 var008(cache/round1/) score = {var008_score:.4f} (수정 전 코드, 참조용)")
+
+seedcheck_scores = sorted(
+    json.loads(p.read_text())["metric"]
+    for p in Path(SEEDCHECK_CACHE_DIR).glob("stage1_var*.json")
+) if Path(SEEDCHECK_CACHE_DIR).exists() else []
+if seedcheck_scores:
+    print(f"§10 3-seed 결과(cache/round1_seedcheck/): {[f'{s:.4f}' for s in seedcheck_scores]} "
+          f"(range={max(seedcheck_scores)-min(seedcheck_scores):.4f})")
+
+# ── 신규 1회 실행 — 수정된 make_env_fn() 이 w1/w2/w3 를 실제로 넘기는 경로 사용 ──
+result_path = Path(WIRING_CHECK_CACHE_DIR) / "stage1_var000.json"
+if result_path.exists():
+    new_score = json.loads(result_path.read_text())["metric"]
+    print(f"\n캐시 재사용: 이미 실행된 결과가 있습니다 (재실행하려면 {result_path} 를 삭제하세요).")
+else:
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+
+    # w1/w2/w3 를 "명시적으로" 넘긴다 — 기본값에 의존하지 않고 실제 배선 경로
+    # (make_env_fn(..., w1=, w2=, w3=) → Step1Env(w1=, w2=, w3=)) 를 정확히 왕복시킨다.
+    vec_env = DummyVecEnv([make_env_fn(
+        150000, VAR008_ALPHA, VAR008_BETA, "medium",
+        w1=DEFAULT_W1, w2=DEFAULT_W2, w3=DEFAULT_W3,
+    )])
+    vec_env = VecMonitor(vec_env)
+    model = build_model(vec_env, lr=3e-4, n_steps=2048, batch_size=64, ent_coef=0.01)
+
+    import wandb
+    from wandb.integration.sb3 import WandbCallback
+    wandb.init(
+        project="pipe-routing-rl",
+        name="step1_round1_wiring_check_var008",
+        config={"alpha": VAR008_ALPHA, "beta": VAR008_BETA,
+                "w1": DEFAULT_W1, "w2": DEFAULT_W2, "w3": DEFAULT_W3,
+                "purpose": "w1_w2_w3_wiring_regression_check"},
+        tags=["step1", "round1", "wiring_check"],
+        reinit=True,
+    )
+    model.learn(total_timesteps=250_000, callback=WandbCallback(gradient_save_freq=0, verbose=0))
+    model.save(f"{WIRING_CHECK_CACHE_DIR}/stage1_var000_model")
+
+    from training.train_step1 import _evaluate_screening
+    eval_result = _evaluate_screening(model, VAR008_ALPHA, VAR008_BETA)
+    new_score = eval_result["score"]
+    wandb.log({"eval/success_rate": eval_result["success_rate"], "eval/score": new_score})
+    wandb.finish()
+    vec_env.close()
+
+    result_path.write_text(json.dumps({
+        "variant_id": 0, "params": {"alpha": VAR008_ALPHA, "beta": VAR008_BETA,
+                                     "w1": DEFAULT_W1, "w2": DEFAULT_W2, "w3": DEFAULT_W3},
+        "metric": new_score, "timesteps": 250_000, "stage": 1,
+    }), encoding="utf-8")
+
+print(f"\n=== 배선 수정 후 신규 var008 재현 score: {new_score:.4f} ===")
+diff_vs_cached = abs(new_score - var008_score)
+print(f"기존 cache/round1/ var008 대비 차이: {diff_vs_cached:.4f} (판정 기준 {THRESHOLD:.4f})")
+
+if diff_vs_cached <= THRESHOLD:
+    print("\n결론: 차이가 측정 한계(0.0135) 안입니다 → 배선 수정이 기존 결과를 통계적으로 "
+          "재현합니다(회귀 없음). Phase 1(효과 크기 사전 추정) 진행 가능.")
+else:
+    print("\n⚠️ 결론: 차이가 측정 한계(0.0135) 를 초과합니다 → 배선 수정 외에 다른 변화가 "
+          "섞였을 가능성이 있습니다. Phase 1 로 넘어가기 전에 diff 를 다시 검토하세요 "
+          "(git diff, envs/step1_env.py 의 _calc_reward() 등).")
 ```
 
 ---

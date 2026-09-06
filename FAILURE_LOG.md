@@ -214,6 +214,133 @@ Episode length 분포를 먼저 측정하고 reward scale 결정해야 함.
 
 > 본 entry는 placeholder 가 아닌 실제 실패 기록. 본 문서가 active learning resource 로 전환되는 시점.
 
+### 2026-09-06 — w1/w2/w3 가 CLI 인자·params dict 에는 있지만 실제 보상 계산에는 전달된 적이 없었음
+
+**상황:**
+Round 1(α/β) 을 var008(α=2.0, β=0.3) 고정으로 종결하고 Round 2(w1×w2×w3 sweep, §16.3.2,
+`enqueue_round2_grid()` 로 이미 grid 존재)로 넘어가기 직전, "Round 2가 실제로 신호를
+만드는지" 를 점검하다가 사용자가 "`train_fn` 에서 w1·w2·w3가 실제로 보상 함수에
+전달되는 배선이 되어 있는지" 확인을 요청. 코드 추적 결과 배선이 아예 없었음을 발견.
+
+**증상:**
+- `training/train_step1.py::run_training()` 은 `--w1/--w2/--w3` CLI 인자를 파싱하고
+  wandb config, `reward_config`, `HandoffConfig.extra`, 콘솔 출력(478행)에 전부
+  기록하지만, 실제 학습에 쓰이는 `make_env_fn(args.seed+i, args.alpha, args.beta,
+  args.difficulty)` 호출에는 넘기지 않았다.
+- `COLAB_GUIDE.md` 의 `make_train_fn_real().train_fn` 도 `params.get("w1"/"w2"/"w3", ...)`
+  로 값을 읽어 지역변수에 담기만 하고, 그 아래 `make_env_fn(...)` 호출에는 `alpha, beta`
+  만 넘겼다.
+- `make_env_fn()` 자체가 w1/w2/w3 를 받는 파라미터가 없었고, `Step1Env.__init__` 도
+  w1/w2/w3 를 받을 방법이 없어 `_calc_reward()` 는 항상 모듈 레벨 상수
+  `W1=0.1/W2=2.0/W3=50.0` 만 참조했다.
+- 겉보기(로그, wandb config, 콘솔 출력)로는 값이 "정상적으로 기록"되고 있어서 배선이
+  살아있다는 착시가 강했다 — 실제로 값이 쓰이는지 검증하는 절차가 없었다면 Round 2
+  (36 variants, ~150시간/222 units 추정) 전체가 **w1/w2/w3 값과 무관하게 항상 동일한
+  reward 함수로 학습되는 완전한 no-op** 이 됐을 것이다.
+
+**원인 분석:**
+
+[원인 1. "값을 읽고 기록한다" 와 "값이 실제로 쓰인다" 를 구분하는 검증 단계가 없었음]
+CLI 인자 파싱(`parse_args`) → wandb config 기록 → handoff 기록까지 각 단계가 전부
+정상 동작해서, 코드를 눈으로 훑을 때 "w1/w2/w3 가 파이프라인을 관통한다"는 인상을
+준다. 그러나 이 모든 지점이 **읽기/기록**일 뿐, 실제 소비처(`_calc_reward()`)까지
+값이 도달하는지 확인하는 단일 테스트도 없었다.
+
+[원인 2. Round 1(α/β) 배선은 처음부터 됐던 게 오히려 함정]
+`alpha, beta` 는 `Step1Env.__init__` 부터 `make_env_fn()` 까지 처음 설계 시점부터
+정상적으로 관통해서, w1/w2/w3 도 "같은 패턴이니 당연히 됐겠지" 라고 가정하기 쉬운
+구조였다. 실제로는 w1/w2/w3 가 CLAUDE.md §16.3.1 baseline reward 초기값으로만 먼저
+구현되고(모듈 상수), 나중에 §16.3.2 Round 2 sweep 설계 시점에 CLI 인자만 추가됐을 뿐
+그 인자를 소비하는 경로가 함께 추가되지 않았다 — 두 파라미터 그룹이 코드베이스에
+들어온 시점이 달라서 생긴 배선 누락.
+
+[원인 3. 2026-08-30 entry 와 동일 유형 — "spec 상수가 정의돼 있다고 실제로 쓰인다는
+보장은 없다"는 교훈이 재발함]
+2026-08-30 entry(screening 평가 버그)의 교훈 3번 "screening/평가 함수는 spec 을
+문서 참조가 아니라 실제 호출부 코드에서 검증해야 한다"가 그대로 재발했다 — 이번엔
+평가가 아니라 학습(reward 계산) 경로에서.
+
+**해결책:**
+1. `envs/step1_env.py::Step1Env.__init__` 에 `w1: float = W1, w2: float = W2,
+   w3: float = W3` 파라미터 추가, `self.w1/self.w2/self.w3` 로 저장. `_calc_reward()`
+   가 모듈 상수 `W1/W2/W3` 대신 `self.w1/self.w2/self.w3` 를 참조하도록 변경.
+   기본값이 기존 모듈 상수와 동일해 override 하지 않으면 기존과 완전히 동일하게 동작
+   (하위호환 보장).
+2. `training/train_step1.py::make_env_fn()` 에 `w1=DEFAULT_W1, w2=DEFAULT_W2,
+   w3=DEFAULT_W3` 파라미터 추가, `Step1Env(...)` 생성 시 전달. `run_training()` 의
+   호출부에서 `args.w1/w2/w3` 를 실제로 넘기도록 수정.
+3. `COLAB_GUIDE.md::make_train_fn_real().train_fn` 의 `make_env_fn(...)` 호출에
+   `w1=w1, w2=w2, w3=w3` 추가.
+4. **배선 검증 절차 신설** (아래 "재발 방지 절차" 참조) — 코드 수정과 별개로, 이번에
+   놓쳤던 종류의 문제를 구조적으로 잡기 위한 절차.
+5. 회귀 테스트 추가:
+   - `tests/test_reward_baseline.py`: `test_default_w1_w2_w3_match_module_constants`
+     (기본값이 모듈 상수와 정확히 같음 — 회귀 방지), `test_w1/w2/w3_override_changes_*`
+     (동일 seed·동일 state 에서 w1/w2/w3 값만 바꾸면 reward 가 실제로 달라짐 — 배선이
+     살아있음을 직접 확인).
+   - `tests/test_train_step1_smoke.py`: `test_make_env_fn_default_w_matches_module_constants`,
+     `test_make_env_fn_forwards_explicit_w_values` (`make_env_fn()` 을 거쳐 실제
+     `Step1Env` 인스턴스까지 값이 도달하는지 확인).
+   - 기존 `tests/test_reward_baseline.py` 의 ~15개 assertion(모두 override 없이 모듈
+     상수 W1/W2/W3 를 직접 참조)이 수정 후에도 그대로 통과함을 확인 — 기본값 동작이
+     바뀌지 않았다는 회귀 증거.
+
+**실측 재현(Round 1 결과와의 비교) 관련 한계**: 이번 CLI 환경(Claude Code, GPU 없음)에서는
+250K 학습 자체를 재현 실행할 수 없다. 대신 위 5번 테스트로 "기본값을 쓰면 `_calc_reward()`
+출력이 수정 전후로 수학적으로 동일한 함수" 임을 코드 레벨에서 증명했다 — reward 계산이
+순수 함수이고 그 출력이 바뀌지 않았다면, 같은 시드/같은 환경 동역학에서 학습 궤적의
+확률분포도 수정 전후로 통계적으로 동일해야 한다(이미 알려진 대로 `MaskablePPO` 가
+unseeded 라 실행마다 원래도 값이 정확히 일치하진 않는다 — §10 3-seed 체크 참조). 완전한
+경험적 확인(= var008 을 수정된 코드로 재학습해 캐시된 0.9322 와 0.0135 노이즈 대역
+안에서 일치하는지)은 Colab GPU 가 필요해 `COLAB_GUIDE.md` 에 §11 로 추가한 별도
+"배선 수정 검증" 셀에서 사용자가 직접 1회 확인하도록 안내했다 (§11 참조, 비용 ~1.23 units).
+
+**재발 방지 절차 (사용자 요청 — "spec 에 정의된 파라미터가 실제로 코드에 연결되어
+있는지 확인하는 절차"):**
+
+autoresearch sweep 대상 파라미터(현재: alpha, beta, w1, w2, w3)를 새로 추가하거나
+변경할 때마다 다음을 의무화한다:
+
+1. **"소비처까지 값이 도달하는가" 테스트를 반드시 함께 추가한다.** CLI 파싱/wandb
+   기록/handoff 저장 테스트만으로는 불충분 — 반드시 "같은 seed·같은 state 에서 파라미터
+   값만 바꾸면 최종 산출값(reward, 또는 해당 파라미터가 영향을 미치는 값)이 실제로
+   달라진다"는 형태의 테스트를 짝으로 둔다 (이번 `test_w1_override_changes_*` 류).
+   파라미터를 "읽기만 하고 기본값이 항상 쓰인다"는 조용한 버그는 값이 달라지는지
+   보는 테스트가 아니면 절대 걸러지지 않는다.
+2. **호출 체인을 코드에서 한 번에 grep 으로 추적**: 새 sweep 파라미터를 추가하면
+   `CLI/params dict → make_*_fn() → 실제 소비 지점(_calc_reward 등)` 전체 체인이
+   한 PR 안에서 문자열 검색만으로 끊김 없이 이어지는지 확인한다
+   (`grep -rn "Step1Env(" ... | grep "w1\|w2\|w3"` 같은 방식으로 이번에 실제 확인함).
+   "각 단계가 개별적으로 동작한다" 는 "체인 전체가 연결돼 있다" 를 보장하지 않는다.
+3. **Round(autoresearch) 시작 전 스모크 체크리스트에 "sweep 파라미터 실제 반영 확인"
+   항목을 추가한다**: 이미 Round 1 dry-run(5K) 단계가 있으므로, 그 dry-run 결과에서
+   sweep 축을 하나 골라 극단값 2개의 산출 metric 이 실제로 달라지는지 확인하는 절차를
+   Round 착수 전 체크리스트에 넣는다 (Round 2 는 아래 Phase 1 "효과 크기 사전 추정"이
+   이 역할을 겸한다 — PROGRESS.md 참조).
+
+**교훈:**
+1. **"CLI 인자로 받아서 로그에 기록한다"는 "실제로 쓰인다"의 증거가 아니다.** 값이
+   config/handoff/console 에 찍히는 것과 그 값이 실제 계산 경로에 들어가는 것은
+   완전히 다른 두 가지 사실이며, 후자를 검증하는 테스트가 없으면 전자만으로는 아무것도
+   보장되지 않는다.
+2. **파라미터가 코드베이스에 들어온 시점이 다르면 배선이 끊기기 쉽다.** alpha/beta 는
+   설계 초기부터 관통 경로가 있었고, w1/w2/w3 는 나중에(§16.3.2 Round 2 설계 시점)
+   CLI 인자만 추가됐다 — "기존 파라미터가 되니까 새 파라미터도 됐겠지"는 검증 없이는
+   성립하지 않는 가정이다.
+3. **이 실패는 2026-08-30 entry(screening 평가 버그)와 같은 계열이다** — "spec/설정에
+   정의돼 있다"와 "실제 호출부에서 쓰인다" 사이의 간극. 두 번째 발생이므로 앞으로
+   sweep 대상 파라미터를 추가할 때마다 위 "재발 방지 절차"를 표준 체크리스트로 삼는다.
+
+**관련 파일/위치:**
+- `envs/step1_env.py::Step1Env.__init__`, `_calc_reward()`
+- `training/train_step1.py::make_env_fn()`, `run_training()`
+- `COLAB_GUIDE.md::make_train_fn_real().train_fn`, 신규 §11(배선 수정 검증 셀)
+- `tests/test_reward_baseline.py`, `tests/test_train_step1_smoke.py` (신규 테스트)
+- 관련: 2026-08-30 entry (screening 평가 버그) — 같은 유형("정의됨 ≠ 실제로 쓰임")의
+  두 번째 발생
+
+---
+
 ### 2026-09-01 — PR #5 의 "이전 버그 캐시 정리" 코드가 진짜 Stage 1 250K 결과를 삭제
 
 **상황:**
@@ -793,9 +920,9 @@ Autoresearch 결과:
 
 ---
 
-**문서 버전:** v1.2 (🎓 졸업판, entry 4개)
+**문서 버전:** v1.3 (🎓 졸업판, entry 6개)
 **졸업일:** 2026-06-24
-**마지막 갱신:** 2026-06-28 (2026-06-28 entry 추가 — §16.3.2 산술 오류 archive. 의사결정 27)
-**이전 갱신:** 2026-06-25 (의사결정 22/23/24), 2026-06-24 (졸업판 동기화), 2026-06-18 (§0.1 dynamic source 역할), 2026-06-11 (entry), 2026-05-14 (첫 entry)
-**최신 entry:** 2026-06-28 — CLAUDE.md §16.3.2 sweep 산술 오류 (4×3×3=27 → 실제 36)
+**마지막 갱신:** 2026-09-06 (2026-09-06 entry 추가 — w1/w2/w3 배선 누락 + 재발 방지 절차)
+**이전 갱신:** 2026-09-01 (Stage 1 캐시 삭제 사고 entry), 2026-08-30 (screening 평가 버그 entry), 2026-06-28 (§16.3.2 산술 오류 archive, 의사결정 27), 2026-06-25 (의사결정 22/23/24), 2026-06-24 (졸업판 동기화), 2026-06-18 (§0.1 dynamic source 역할), 2026-06-11 (entry), 2026-05-14 (첫 entry)
+**최신 entry:** 2026-09-06 — w1/w2/w3 가 CLI 인자·params dict 에는 있지만 실제 보상 계산에는 전달된 적이 없었음
 **첫 entry:** 2026-05-14 — Phase 1 비효율 경로 + Hierarchical 가설 오진단
