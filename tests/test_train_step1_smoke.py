@@ -195,3 +195,34 @@ def test_smoke_model_path_loadable(smoke_result) -> None:
     model = MaskablePPO.load(str(result.model_path.with_suffix("")), vec_env)
     assert model is not None
     vec_env.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. make_env_fn() w1/w2/w3 배선 검증 (2026-09 FAILURE_LOG)
+#
+# 이전에는 make_env_fn() 이 w1/w2/w3 파라미터 자체를 받지 않아 Step1Env 에
+# 절대 전달되지 못했다 (Round 2 sweep 이 코드상 no-op 이었던 원인). 아래는
+# (a) 기본값 생략 시 Step1Env 모듈 상수와 동일함, (b) 명시적으로 넘긴 값이
+# 실제로 생성된 Step1Env 인스턴스에 그대로 반영됨을 확인한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_make_env_fn_default_w_matches_module_constants() -> None:
+    from envs.step1_env import W1, W2, W3
+    from training.train_step1 import make_env_fn
+
+    env = make_env_fn(150000, 1.0, 0.1, "easy")()
+    assert env.w1 == W1
+    assert env.w2 == W2
+    assert env.w3 == W3
+    env.close()
+
+
+def test_make_env_fn_forwards_explicit_w_values() -> None:
+    from training.train_step1 import make_env_fn
+
+    env = make_env_fn(150000, 1.0, 0.1, "easy", w1=0.5, w2=5.0, w3=100.0)()
+    assert env.w1 == 0.5
+    assert env.w2 == 5.0
+    assert env.w3 == 100.0
+    env.close()
