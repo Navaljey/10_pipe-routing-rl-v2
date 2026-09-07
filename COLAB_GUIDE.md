@@ -156,13 +156,21 @@ if os.path.exists(_dry_db):
     os.remove(_dry_db)
 print(f"dry-run 전용 캐시/DB 정리 완료 ({SMOKE_CACHE_DIR}) — cache/round1/ 은 건드리지 않음")
 
-def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
+def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None, round_n=1):
     """실제 Step1Env 기반 train_fn.
 
     cache_dir 는 반드시 호출부에서 명시적으로 전달한다 (dry-run 은 SMOKE_CACHE_DIR,
     본 실행은 CACHE_DIR). 체크포인트를 여기 저장하므로, 전역 CACHE_DIR 을 암묵적으로
     참조하면 dry-run 이 진짜 캐시 폴더에 체크포인트를 잘못 쓰거나 셀 5/6 실행 시점에
     따라 저장 위치가 바뀌는 등 dry-run/본 실행이 서로 뒤섞일 위험이 있다.
+
+    round_n 은 wandb run 이름/tag(§16.6.6, `build_run_name` 등)에만 쓰인다 — 기본값 1
+    은 셀 4/5/6(Round 1) 호출부를 그대로 유지하기 위함이다. Round 2 이상을 학습하는
+    새 셀에서는 반드시 `round_n=2` 처럼 명시적으로 넘겨야 wandb 에서 Round 1 결과와
+    섞이지 않는다 (2026-09 발견: §12 Phase 1 이 이 인자 없이 호출되어 실제로는 Round 2
+    학습인데 wandb run 이름이 `step1_round1_stage1_var*` 로 찍히는 문제가 있었다 —
+    이미 실행 중인 Phase 1 은 재현성을 위해 그대로 두고, 이 함수만 향후 호출부가
+    올바르게 쓸 수 있도록 고쳤다).
     """
     assert cache_dir is not None, "cache_dir 를 명시적으로 전달하세요 (SMOKE_CACHE_DIR 또는 CACHE_DIR)"
     from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
@@ -190,7 +198,6 @@ def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
         import wandb
         from autoresearch.wandb_callback import build_run_name, build_run_config, build_run_tags
         from wandb.integration.sb3 import WandbCallback
-        round_n = 1
         stage_n = 1 if timesteps <= 250_000 else 2
 
         run = wandb.init(
@@ -1052,6 +1059,13 @@ print(f"{len(variants)}개 중 {_cache_hit_n}개 캐시 재사용, {len(variants
 
 from autoresearch.stage_runner import StageRunner
 
+# ⚠️ 알려진 제한사항(2026-09): 아래 호출이 round_n 을 안 넘겨 wandb run 이름이
+# `step1_round1_stage1_var*` 로 찍힌다 — 실제로는 Round 2 Phase 1 인데 Round 1 로
+# 표시되어 wandb 대시보드에서 기존 Round 1 결과와 구분이 안 된다. 이미 실행 중인
+# Phase 1 은 재현성(세션 재개 시 동일 코드 유지)을 위해 의도적으로 그대로 둔다 —
+# 이 실행의 결과는 `cache/round2_phase1_prescreen/` 파일명으로 이미 명확히
+# 구분되므로 분석에는 지장 없다. Phase 1 을 처음부터 다시 돌리거나 Phase 2 셀을
+# 새로 작성할 때는 반드시 `round_n=2` 를 명시할 것 (make_train_fn_real 정의부 참조).
 runner = StageRunner(
     train_fn=make_train_fn_real(n_envs=1, cache_dir=PHASE1_CACHE_DIR),
     max_workers=1,               # ThreadPoolExecutor GIL 경합 회피 (§5 상단 안내 참조)
