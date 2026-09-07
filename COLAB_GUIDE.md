@@ -20,7 +20,8 @@
 > | `cache/round1_smoke/` | 셀 4 dry-run(5K) 전용 | 버릴 데이터 | 셀 4 실행마다 자동 정리됨 |
 > | `cache/round1_cli_smoke/` | `scripts/dryrun_round1.py` — 로컬/CI 전용, **Colab 노트북과 무관** | 버릴 데이터 | 그 스크립트 실행마다 자동 정리됨 |
 > | `cache/round1_seedcheck/` | §10 var008 3-seed 분산 체크 전용 (`cache/round1/` 과 절대 안 겹침) | 영구 보존(진단 근거) | 자동 삭제 없음 — 결과 재사용(캐시 히트)을 위해 유지 |
-> | `cache/round1_wiring_check/` | §11 w1/w2/w3 배선 수정 검증 전용 | 영구 보존(진단 근거) | 자동 삭제 없음 — 결과 재사용(캐시 히트)을 위해 유지 |
+> | `cache/round1_wiring_check/` | §11 w1/w2/w3 배선 수정 검증 전용 (이번 실행 경로에서는 §11 대신 아래 `round2_phase1_prescreen/` 로 검증) | 영구 보존(진단 근거) | 자동 삭제 없음 — 결과 재사용(캐시 히트)을 위해 유지 |
+> | `cache/round2_phase1_prescreen/` | §12 Round 2 Phase 1(w1/w2/w3 효과 크기 사전 스크리닝, 6 variants) 전용 | 영구 보존(진단 근거) | 자동 삭제 없음 — 결과 재사용(캐시 히트)을 위해 유지 |
 >
 > **정리 대상 (사용자 확인 후 수동 삭제 — 본 문서에 자동 삭제 코드를 넣지 않음)**:
 > `cache/round1_dry/`, `cache/dryrun_round1/` 이 Drive 에 남아 있다면 각각 위 표의
@@ -971,6 +972,138 @@ else:
 
 ---
 
+## 12. Round 2 Phase 1 — w1/w2/w3 효과 크기 사전 스크리닝 (6 × 250K)
+
+> 2026-09 PROGRESS.md 의사결정 31: 이번 실행 경로에서는 §11(var008 1회 재현 체크)을
+> 건너뛰고 배선 검증을 본 Phase 1 결과로 대체한다. §11 은 all-or-nothing 구조라
+> 세션이 끊기면 진행분 회수가 안 되고(실측: 31% 지점에서 중단, ~1 unit 유실), 1-seed
+> 비교라 판정 기준(0.0135)과 노이즈(3-seed range 0.0135)가 같은 크기라 배선 영향과
+> seed 편차를 구분하지 못한다. 반면 본 셀은 (a) §5 와 동일한 `make_train_fn_real()` 을
+> 그대로 재사용해 실전 학습 경로 자체로 검증하고, (b) w1/w2/w3 극값 간 score 가 실제로
+> 갈리면 그 자체가 배선이 살아있다는 더 직접적인 증거이며, (c) variant 단위 캐시라
+> 중간에 끊겨도 진행분이 보존된다.
+>
+> `cache/round1/` (진짜 Stage 1/2 결과)은 이 셀에서 var008 기준선을 **읽기만** 하고
+> 절대 쓰지 않는다 — 결과는 `cache/round2_phase1_prescreen/` 전용 디렉터리에 저장한다.
+
+```python
+"""
+Round 2 Phase 1 — w1/w2/w3 효과 크기 사전 스크리닝.
+3축(w1/w2/w3) 각각 grid 양극단 2개, 나머지 두 인자는 baseline(w1=0.1/w2=2.0/w3=50.0)
+고정, alpha/beta 는 var008 고정값(2.0/0.3). 총 6 variants × 250K.
+
+목적: Round 2(36 variants) 본 실행 전, 각 축이 250K 스케일에서 노이즈(0.0135)를 넘는
+신호를 만드는지 확인해 Phase 2 grid 축소 폭을 데이터 기반으로 정한다
+(PROGRESS.md 의사결정 30/31 참조).
+
+train_fn 은 셀 4 에서 정의한 make_train_fn_real() 을 그대로 재사용한다 — §5(Stage 1)와
+동일한 코드 경로이므로 w1/w2/w3 배선(PR #9) 검증도 겸한다.
+"""
+import json
+from pathlib import Path
+import torch
+
+if "PROJECT" not in globals():
+    raise RuntimeError("PROJECT 가 정의되지 않았습니다 — 먼저 셀 1(환경 설정)을 실행하세요.")
+CACHE_DIR = f"{PROJECT}/cache/round1"
+PHASE1_CACHE_DIR = f"{PROJECT}/cache/round2_phase1_prescreen"   # round1/ 과 절대 안 겹침
+Path(PHASE1_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+# GPU 확인 (하드 스톱) — 셀 5/10/11 과 동일
+REQUIRE_GPU = True
+if torch.cuda.is_available():
+    print(f"✅ GPU 사용 중: {torch.cuda.get_device_name(0)}")
+else:
+    print("⚠️ GPU 를 사용할 수 없습니다 — CPU 로 진행하면 수 배 느려집니다.")
+    if REQUIRE_GPU:
+        raise RuntimeError(
+            "GPU 미사용 — REQUIRE_GPU=True(기본값) 라 중단합니다. "
+            "GPU 없이 계속하려면 이 셀 상단의 REQUIRE_GPU = False 로 바꾸세요."
+        )
+
+VAR008_ALPHA, VAR008_BETA = 2.0, 0.3
+BASELINE_W1, BASELINE_W2, BASELINE_W3 = 0.1, 2.0, 50.0
+THRESHOLD = 0.0135   # PROGRESS.md 의사결정 28 — 3-seed 실측 range, 앞으로도 쓰는 판정 기준
+
+# (축 이름, 극값 라벨, variant params) — index 순서가 곧 variant_id(0~5)가 된다.
+_AXIS_PLAN = [
+    ("w1", "min", {"alpha": VAR008_ALPHA, "beta": VAR008_BETA, "w1": 0.05, "w2": BASELINE_W2, "w3": BASELINE_W3}),
+    ("w1", "max", {"alpha": VAR008_ALPHA, "beta": VAR008_BETA, "w1": 0.5,  "w2": BASELINE_W2, "w3": BASELINE_W3}),
+    ("w2", "min", {"alpha": VAR008_ALPHA, "beta": VAR008_BETA, "w1": BASELINE_W1, "w2": 1.0, "w3": BASELINE_W3}),
+    ("w2", "max", {"alpha": VAR008_ALPHA, "beta": VAR008_BETA, "w1": BASELINE_W1, "w2": 5.0, "w3": BASELINE_W3}),
+    ("w3", "min", {"alpha": VAR008_ALPHA, "beta": VAR008_BETA, "w1": BASELINE_W1, "w2": BASELINE_W2, "w3": 20.0}),
+    ("w3", "max", {"alpha": VAR008_ALPHA, "beta": VAR008_BETA, "w1": BASELINE_W1, "w2": BASELINE_W2, "w3": 100.0}),
+]
+variants = [params for _, _, params in _AXIS_PLAN]
+
+# ── 기준선: var008(w1/w2/w3 모두 baseline) 기존 결과를 재사용, 재학습하지 않음 ──
+var008_path = Path(CACHE_DIR) / "stage1_var008.json"
+assert var008_path.exists(), (
+    f"{var008_path} 를 찾을 수 없습니다 — Stage 1(셀 5)이 완료된 상태에서 실행하세요."
+)
+var008_score = json.loads(var008_path.read_text())["metric"]
+print(f"기준선(var008, cache/round1/) score = {var008_score:.4f}")
+
+_cache_hit_n = sum(
+    1 for i in range(len(variants)) if (Path(PHASE1_CACHE_DIR) / f"stage1_var{i:03d}.json").exists()
+)
+print(f"{len(variants)}개 중 {_cache_hit_n}개 캐시 재사용, {len(variants) - _cache_hit_n}개 신규 학습 "
+      f"(예상 추가 소요: 최대 {(len(variants) - _cache_hit_n) * 50}분)")
+
+from autoresearch.stage_runner import StageRunner
+
+runner = StageRunner(
+    train_fn=make_train_fn_real(n_envs=1, cache_dir=PHASE1_CACHE_DIR),
+    max_workers=1,               # ThreadPoolExecutor GIL 경합 회피 (§5 상단 안내 참조)
+    stage1_timesteps=250_000,
+    stage1_keep_ratio=1.0,       # 스크리닝이 아니라 효과 크기 측정이므로 탈락 없음
+    cache_dir=PHASE1_CACHE_DIR,
+)
+
+print(f"\n=== Phase 1 시작: {len(variants)} variants × 250K ===")
+results = runner.run_stage1(variants)   # keep_ratio=1.0 이라 전부 반환됨
+scores = {r.variant_id: r.metric for r in results}
+
+# ── 축별 판정 ─────────────────────────────────────────────────────────────
+print(f"\n{'='*70}\nRound 2 Phase 1 — 축별 효과 크기 (기준선 var008={var008_score:.4f}, "
+      f"판정 기준={THRESHOLD:.4f})\n{'='*70}")
+
+_axis_verdicts = {}
+for axis in ("w1", "w2", "w3"):
+    lo_id = next(i for i, (a, lbl, _) in enumerate(_AXIS_PLAN) if a == axis and lbl == "min")
+    hi_id = next(i for i, (a, lbl, _) in enumerate(_AXIS_PLAN) if a == axis and lbl == "max")
+    score_lo, score_hi = scores[lo_id], scores[hi_id]
+    diff_lo = abs(score_lo - var008_score)
+    diff_hi = abs(score_hi - var008_score)
+    axis_range = abs(score_hi - score_lo)   # 보조 지표 — 배선 생존 신호(두 극값이 서로 다른가)
+    signal = max(diff_lo, diff_hi) > THRESHOLD
+    _axis_verdicts[axis] = signal
+
+    print(f"\n[{axis}] min={_AXIS_PLAN[lo_id][2][axis]} → score={score_lo:.4f} (Δ={diff_lo:.4f})")
+    print(f"      max={_AXIS_PLAN[hi_id][2][axis]} → score={score_hi:.4f} (Δ={diff_hi:.4f})")
+    print(f"      극값 간 range={axis_range:.4f} (참고 — 배선 생존 신호: 0 에 가까우면 의심)")
+    if signal:
+        print(f"      → 판정: 신호 있음 (임계값 {THRESHOLD:.4f} 초과) — sweep 유지 권장")
+    else:
+        print(f"      → 판정: 신호 없음 (임계값 {THRESHOLD:.4f} 이내) — 해당 인자는 sweep 대상에서 제외 권장")
+
+n_signal = sum(_axis_verdicts.values())
+print(f"\n{'='*70}\n요약: 3축 중 {n_signal}개 축에서 신호 확인 "
+      f"({', '.join(a for a, s in _axis_verdicts.items() if s) or '없음'})")
+if n_signal == 0:
+    print("→ w1/w2/w3 모두 250K 스케일에서 유의한 차이를 만들지 않습니다. "
+          "Round 2 를 조기 종료하고 baseline 그대로 다음 단계로 이동을 권장합니다.")
+elif n_signal < 3:
+    print(f"→ 신호 있는 축만 원 해상도 유지, 나머지는 baseline 고정한 축소 grid 로 "
+          f"Phase 2 를 구성하는 것을 권장합니다.")
+else:
+    print("→ 3축 모두 신호가 있어 원 36-grid 를 유지하되, 각 점 최소 2-seed 로 "
+          "Phase 2 를 구성하는 것을 권장합니다.")
+print(f"{'='*70}")
+```
+
+---
+
 ## 타임라인 예상 (무료 Colab T4, worker 1 — 순차 실행)
 
 | 단계 | 예상 시간 | 세션 내 완료 여부 |
@@ -979,6 +1112,7 @@ else:
 | Stage 1 (12 × 250K, worker 1) | ~3~4시간 | ✅ (12시간 내) |
 | Stage 2 (6 × 2M, worker 1) | ~12~14시간 | ⚠️ 세션 1개로 안 끝남 — 캐시로 이어서 진행 |
 | **Round 1 합계** | **~15~18시간** | ⚠️ 최소 2세션 필요. 무료 tier 사용량 한도는 고정 12시간이 아니라 최근 사용량에 따라 변동하므로 3세션 이상 걸릴 수 있음 |
+| Round 2 Phase 1 (6 × 250K, worker 1) | ~4.8~5.2시간 (중앙값 ~5.0시간, ~7.1~7.7 units) | ✅ (12시간 내), variant 단위 캐시로 재개 가능 |
 
 > **팁**: Stage 1 완료 후 결과 저장 확인 (셀 5 마지막 줄) → Stage 2는 새 세션에서 시작해도 캐시로 복구됩니다. Stage 2 개별 variant(약 2.2시간)는 세션 한도보다 훨씬 짧으므로, 세션이 끊겨도 대부분 "variant 경계"에서 끊기고 §8 의 "학습 도중" 복구 절차까지 필요한 경우는 드뭅니다.
 
