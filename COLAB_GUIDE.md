@@ -1079,6 +1079,13 @@ results = runner.run_stage1(variants)   # keep_ratio=1.0 이라 전부 반환됨
 scores = {r.variant_id: r.metric for r in results}
 
 # ── 축별 판정 ─────────────────────────────────────────────────────────────
+# ⚠️ 2026-09 FAILURE_LOG: 최초 버전은 var008 기준선과의 Δ(max(diff_lo, diff_hi))로
+# 판정했으나 이는 잘못된 비교였다 — var008 은 §10 3-seed 실험에서 0.9187~0.9322 로
+# 흔들린 값의 상단이라, "극값이 그 흔들리는 점 하나와 얼마나 다른가"는 축의 효과와
+# 무관하게 baseline 자체의 위치에 따라 왜곡된다. 축의 효과는 그 축의 두 극값끼리
+# 비교(axis_range)해야 한다 — 실제로 w1 은 값을 10배(0.05→0.5) 바꿔도 axis_range 가
+# 노이즈(0.0135)의 2%(0.0003)에 불과해 명백히 효과 없음인데, 첫 버전은 "신호 있음"으로
+# 오판정했다(자세한 원인은 FAILURE_LOG.md 참조). 판정 기준을 axis_range 로 수정한다.
 print(f"\n{'='*70}\nRound 2 Phase 1 — 축별 효과 크기 (기준선 var008={var008_score:.4f}, "
       f"판정 기준={THRESHOLD:.4f})\n{'='*70}")
 
@@ -1087,19 +1094,24 @@ for axis in ("w1", "w2", "w3"):
     lo_id = next(i for i, (a, lbl, _) in enumerate(_AXIS_PLAN) if a == axis and lbl == "min")
     hi_id = next(i for i, (a, lbl, _) in enumerate(_AXIS_PLAN) if a == axis and lbl == "max")
     score_lo, score_hi = scores[lo_id], scores[hi_id]
-    diff_lo = abs(score_lo - var008_score)
-    diff_hi = abs(score_hi - var008_score)
-    axis_range = abs(score_hi - score_lo)   # 보조 지표 — 배선 생존 신호(두 극값이 서로 다른가)
-    signal = max(diff_lo, diff_hi) > THRESHOLD
+    axis_range = abs(score_hi - score_lo)     # 판정 기준 — 이 축의 실제 효과 크기
+    diff_lo = score_lo - var008_score          # 참고용 — 판정에는 사용하지 않음
+    diff_hi = score_hi - var008_score          # 참고용 — 판정에는 사용하지 않음
+    signal = axis_range > THRESHOLD
     _axis_verdicts[axis] = signal
 
-    print(f"\n[{axis}] min={_AXIS_PLAN[lo_id][2][axis]} → score={score_lo:.4f} (Δ={diff_lo:.4f})")
-    print(f"      max={_AXIS_PLAN[hi_id][2][axis]} → score={score_hi:.4f} (Δ={diff_hi:.4f})")
-    print(f"      극값 간 range={axis_range:.4f} (참고 — 배선 생존 신호: 0 에 가까우면 의심)")
+    print(f"\n[{axis}] min={_AXIS_PLAN[lo_id][2][axis]} → score={score_lo:.4f} "
+          f"(참고: baseline 대비 {diff_lo:+.4f})")
+    print(f"      max={_AXIS_PLAN[hi_id][2][axis]} → score={score_hi:.4f} "
+          f"(참고: baseline 대비 {diff_hi:+.4f})")
+    print(f"      극값 간 range={axis_range:.4f}  ← 판정 기준")
     if signal:
-        print(f"      → 판정: 신호 있음 (임계값 {THRESHOLD:.4f} 초과) — sweep 유지 권장")
+        favored = "min" if score_lo > score_hi else "max"
+        print(f"      → 판정: 신호 있음 (range {axis_range:.4f} > 임계값 {THRESHOLD:.4f}) "
+              f"— sweep 유지 권장, {favored} 방향({_AXIS_PLAN[lo_id if favored=='min' else hi_id][2][axis]}) 우세")
     else:
-        print(f"      → 판정: 신호 없음 (임계값 {THRESHOLD:.4f} 이내) — 해당 인자는 sweep 대상에서 제외 권장")
+        print(f"      → 판정: 신호 없음 (range {axis_range:.4f} ≤ 임계값 {THRESHOLD:.4f}) "
+              f"— 해당 인자는 sweep 대상에서 제외 권장")
 
 n_signal = sum(_axis_verdicts.values())
 print(f"\n{'='*70}\n요약: 3축 중 {n_signal}개 축에서 신호 확인 "
