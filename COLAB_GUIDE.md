@@ -22,6 +22,7 @@
 > | `cache/round1_seedcheck/` | §10 var008 3-seed 분산 체크 전용 (`cache/round1/` 과 절대 안 겹침) | 영구 보존(진단 근거) | 자동 삭제 없음 — 결과 재사용(캐시 히트)을 위해 유지 |
 > | `cache/round1_wiring_check/` | §11 w1/w2/w3 배선 수정 검증 전용 (이번 실행 경로에서는 §11 대신 아래 `round2_phase1_prescreen/` 로 검증) | 영구 보존(진단 근거) | 자동 삭제 없음 — 결과 재사용(캐시 히트)을 위해 유지 |
 > | `cache/round2_phase1_prescreen/` | §12 Round 2 Phase 1(w1/w2/w3 효과 크기 사전 스크리닝, 6 variants) 전용 | 영구 보존(진단 근거) | 자동 삭제 없음 — 결과 재사용(캐시 히트)을 위해 유지 |
+> | `cache/round2_phase2/` | §13 Round 2 Phase 2(w2×w3 9-cell × 2-seed 본 grid, 18 variants) 전용 | 영구 보존(Round 2 본 결과) | 자동 삭제 없음 |
 >
 > **정리 대상 (사용자 확인 후 수동 삭제 — 본 문서에 자동 삭제 코드를 넣지 않음)**:
 > `cache/round1_dry/`, `cache/dryrun_round1/` 이 Drive 에 남아 있다면 각각 위 표의
@@ -156,13 +157,21 @@ if os.path.exists(_dry_db):
     os.remove(_dry_db)
 print(f"dry-run 전용 캐시/DB 정리 완료 ({SMOKE_CACHE_DIR}) — cache/round1/ 은 건드리지 않음")
 
-def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
+def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None, round_n=1):
     """실제 Step1Env 기반 train_fn.
 
     cache_dir 는 반드시 호출부에서 명시적으로 전달한다 (dry-run 은 SMOKE_CACHE_DIR,
     본 실행은 CACHE_DIR). 체크포인트를 여기 저장하므로, 전역 CACHE_DIR 을 암묵적으로
     참조하면 dry-run 이 진짜 캐시 폴더에 체크포인트를 잘못 쓰거나 셀 5/6 실행 시점에
     따라 저장 위치가 바뀌는 등 dry-run/본 실행이 서로 뒤섞일 위험이 있다.
+
+    round_n 은 wandb run 이름/tag(§16.6.6, `build_run_name` 등)에만 쓰인다 — 기본값 1
+    은 셀 4/5/6(Round 1) 호출부를 그대로 유지하기 위함이다. Round 2 이상을 학습하는
+    새 셀에서는 반드시 `round_n=2` 처럼 명시적으로 넘겨야 wandb 에서 Round 1 결과와
+    섞이지 않는다 (2026-09 발견: §12 Phase 1 이 이 인자 없이 호출되어 실제로는 Round 2
+    학습인데 wandb run 이름이 `step1_round1_stage1_var*` 로 찍히는 문제가 있었다 —
+    이미 실행 중인 Phase 1 은 재현성을 위해 그대로 두고, 이 함수만 향후 호출부가
+    올바르게 쓸 수 있도록 고쳤다).
     """
     assert cache_dir is not None, "cache_dir 를 명시적으로 전달하세요 (SMOKE_CACHE_DIR 또는 CACHE_DIR)"
     from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
@@ -190,7 +199,6 @@ def make_train_fn_real(n_envs=1, handoff_dir=None, cache_dir=None):
         import wandb
         from autoresearch.wandb_callback import build_run_name, build_run_config, build_run_tags
         from wandb.integration.sb3 import WandbCallback
-        round_n = 1
         stage_n = 1 if timesteps <= 250_000 else 2
 
         run = wandb.init(
@@ -1052,6 +1060,13 @@ print(f"{len(variants)}개 중 {_cache_hit_n}개 캐시 재사용, {len(variants
 
 from autoresearch.stage_runner import StageRunner
 
+# ⚠️ 알려진 제한사항(2026-09): 아래 호출이 round_n 을 안 넘겨 wandb run 이름이
+# `step1_round1_stage1_var*` 로 찍힌다 — 실제로는 Round 2 Phase 1 인데 Round 1 로
+# 표시되어 wandb 대시보드에서 기존 Round 1 결과와 구분이 안 된다. 이미 실행 중인
+# Phase 1 은 재현성(세션 재개 시 동일 코드 유지)을 위해 의도적으로 그대로 둔다 —
+# 이 실행의 결과는 `cache/round2_phase1_prescreen/` 파일명으로 이미 명확히
+# 구분되므로 분석에는 지장 없다. Phase 1 을 처음부터 다시 돌리거나 Phase 2 셀을
+# 새로 작성할 때는 반드시 `round_n=2` 를 명시할 것 (make_train_fn_real 정의부 참조).
 runner = StageRunner(
     train_fn=make_train_fn_real(n_envs=1, cache_dir=PHASE1_CACHE_DIR),
     max_workers=1,               # ThreadPoolExecutor GIL 경합 회피 (§5 상단 안내 참조)
@@ -1065,6 +1080,13 @@ results = runner.run_stage1(variants)   # keep_ratio=1.0 이라 전부 반환됨
 scores = {r.variant_id: r.metric for r in results}
 
 # ── 축별 판정 ─────────────────────────────────────────────────────────────
+# ⚠️ 2026-09 FAILURE_LOG: 최초 버전은 var008 기준선과의 Δ(max(diff_lo, diff_hi))로
+# 판정했으나 이는 잘못된 비교였다 — var008 은 §10 3-seed 실험에서 0.9187~0.9322 로
+# 흔들린 값의 상단이라, "극값이 그 흔들리는 점 하나와 얼마나 다른가"는 축의 효과와
+# 무관하게 baseline 자체의 위치에 따라 왜곡된다. 축의 효과는 그 축의 두 극값끼리
+# 비교(axis_range)해야 한다 — 실제로 w1 은 값을 10배(0.05→0.5) 바꿔도 axis_range 가
+# 노이즈(0.0135)의 2%(0.0003)에 불과해 명백히 효과 없음인데, 첫 버전은 "신호 있음"으로
+# 오판정했다(자세한 원인은 FAILURE_LOG.md 참조). 판정 기준을 axis_range 로 수정한다.
 print(f"\n{'='*70}\nRound 2 Phase 1 — 축별 효과 크기 (기준선 var008={var008_score:.4f}, "
       f"판정 기준={THRESHOLD:.4f})\n{'='*70}")
 
@@ -1073,19 +1095,24 @@ for axis in ("w1", "w2", "w3"):
     lo_id = next(i for i, (a, lbl, _) in enumerate(_AXIS_PLAN) if a == axis and lbl == "min")
     hi_id = next(i for i, (a, lbl, _) in enumerate(_AXIS_PLAN) if a == axis and lbl == "max")
     score_lo, score_hi = scores[lo_id], scores[hi_id]
-    diff_lo = abs(score_lo - var008_score)
-    diff_hi = abs(score_hi - var008_score)
-    axis_range = abs(score_hi - score_lo)   # 보조 지표 — 배선 생존 신호(두 극값이 서로 다른가)
-    signal = max(diff_lo, diff_hi) > THRESHOLD
+    axis_range = abs(score_hi - score_lo)     # 판정 기준 — 이 축의 실제 효과 크기
+    diff_lo = score_lo - var008_score          # 참고용 — 판정에는 사용하지 않음
+    diff_hi = score_hi - var008_score          # 참고용 — 판정에는 사용하지 않음
+    signal = axis_range > THRESHOLD
     _axis_verdicts[axis] = signal
 
-    print(f"\n[{axis}] min={_AXIS_PLAN[lo_id][2][axis]} → score={score_lo:.4f} (Δ={diff_lo:.4f})")
-    print(f"      max={_AXIS_PLAN[hi_id][2][axis]} → score={score_hi:.4f} (Δ={diff_hi:.4f})")
-    print(f"      극값 간 range={axis_range:.4f} (참고 — 배선 생존 신호: 0 에 가까우면 의심)")
+    print(f"\n[{axis}] min={_AXIS_PLAN[lo_id][2][axis]} → score={score_lo:.4f} "
+          f"(참고: baseline 대비 {diff_lo:+.4f})")
+    print(f"      max={_AXIS_PLAN[hi_id][2][axis]} → score={score_hi:.4f} "
+          f"(참고: baseline 대비 {diff_hi:+.4f})")
+    print(f"      극값 간 range={axis_range:.4f}  ← 판정 기준")
     if signal:
-        print(f"      → 판정: 신호 있음 (임계값 {THRESHOLD:.4f} 초과) — sweep 유지 권장")
+        favored = "min" if score_lo > score_hi else "max"
+        print(f"      → 판정: 신호 있음 (range {axis_range:.4f} > 임계값 {THRESHOLD:.4f}) "
+              f"— sweep 유지 권장, {favored} 방향({_AXIS_PLAN[lo_id if favored=='min' else hi_id][2][axis]}) 우세")
     else:
-        print(f"      → 판정: 신호 없음 (임계값 {THRESHOLD:.4f} 이내) — 해당 인자는 sweep 대상에서 제외 권장")
+        print(f"      → 판정: 신호 없음 (range {axis_range:.4f} ≤ 임계값 {THRESHOLD:.4f}) "
+              f"— 해당 인자는 sweep 대상에서 제외 권장")
 
 n_signal = sum(_axis_verdicts.values())
 print(f"\n{'='*70}\n요약: 3축 중 {n_signal}개 축에서 신호 확인 "
@@ -1104,6 +1131,192 @@ print(f"{'='*70}")
 
 ---
 
+## 13. Round 2 Phase 2 — w2×w3 본 grid (9 조합 × 2-seed = 18회)
+
+> PROGRESS.md 의사결정 32: Phase 1 결과(w1 range=0.0003 → 제외, w2/w3 모두 grid 경계값이
+> 우세)에 따라 §16.3.2 원 grid 를 승자 방향으로 이동했다 — w1=0.1 고정,
+> w2 ∈ {0.5, 1.0, 2.0}(원 {1.0,2.0,5.0}에서 패자 5.0 대신 경계 밖 0.5 추가),
+> w3 ∈ {50, 100, 200}(원 {20,50,100}에서 패자 20 대신 경계 밖 200 추가). alpha/beta 는
+> var008 고정값(2.0/0.3). 근거는 docs/autoresearch-ops.md §16.5.B "Stage 2: 살아남은
+> 후보 ± 50% local grid" 원칙 — 자세한 근거는 PROGRESS.md 의사결정 32 참조.
+>
+> `cache/round1/`, `cache/round2_phase1_prescreen/` 은 이 셀에서 캐시 재사용 후보를
+> **읽기만** 하고 절대 쓰지 않는다 — 결과는 `cache/round2_phase2/` 전용 디렉터리에
+> 저장한다. wandb run 이름은 `round_n=2` 를 명시해 `step1_round2_stage1_var*` 로
+> 찍히도록 한다(§12 는 이미 실행된 뒤라 그대로 두고, 이 셀부터 바로잡음).
+
+```python
+"""
+Round 2 Phase 2 — w2×w3 9 조합 × 2-seed = 18 variants × 250K.
+
+캐시 재사용 규칙 (사용자 확인 사항 1): alpha/beta/w1/w2/w3 다섯 값이 모두 완전히
+일치할 때만 재사용한다. 하나라도 다르면 해당 슬롯은 무조건 새로 학습한다 — "비슷하니
+재사용"은 하지 않는다.
+  - (w2=2.0, w3=50) 의 seed 슬롯 0 ← cache/round1/stage1_var008.json (Round 1 var008)
+  - (w2=1.0, w3=50) 의 seed 슬롯 0 ← cache/round2_phase1_prescreen/stage1_var002.json
+둘 다 seed 슬롯 1 은 새로 학습한다 — "재사용 1개 + 신규 1개로 2-seed 채우기"가
+"2개 다 신규"와 통계적으로 다르지 않다는 판단 근거는 PROGRESS.md 의사결정 32 참조
+(PR #9 로 기본값 경로가 수정 전후 완전히 동일함이 코드 레벨로 이미 검증됐으므로,
+재사용 슬롯이 신규 슬롯과 다른 분포에서 나왔다고 볼 근거가 없다).
+
+판정(사용자 확인 사항 3): 각 9-cell 의 2-seed 평균으로 순위를 매기되, 인접한
+두 cell 의 평균 차이가 "이 실험에서 실측된 seed 편차"보다 작으면 같은 그룹(구분 불가)
+으로 묶는다. 노이즈 임계값은 max(이번 9-cell 의 |seed0-seed1| 평균, 0.0135) 로
+정한다 — 기존 0.0135(§10) 보다 이번 실측 편차가 크게 나오면(w3=200 처럼 미검증 영역
+확장 시 불안정할 수 있음) 더 보수적인 쪽을 쓴다.
+"""
+import json
+from pathlib import Path
+import torch
+
+if "PROJECT" not in globals():
+    raise RuntimeError("PROJECT 가 정의되지 않았습니다 — 먼저 셀 1(환경 설정)을 실행하세요.")
+ROUND1_CACHE_DIR = f"{PROJECT}/cache/round1"
+PHASE1_CACHE_DIR = f"{PROJECT}/cache/round2_phase1_prescreen"
+PHASE2_CACHE_DIR = f"{PROJECT}/cache/round2_phase2"   # round1/, round2_phase1_prescreen/ 과 절대 안 겹침
+Path(PHASE2_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+# GPU 확인 (하드 스톱) — 셀 5/10/11/12 와 동일
+REQUIRE_GPU = True
+if torch.cuda.is_available():
+    print(f"✅ GPU 사용 중: {torch.cuda.get_device_name(0)}")
+else:
+    print("⚠️ GPU 를 사용할 수 없습니다 — CPU 로 진행하면 수 배 느려집니다.")
+    if REQUIRE_GPU:
+        raise RuntimeError(
+            "GPU 미사용 — REQUIRE_GPU=True(기본값) 라 중단합니다. "
+            "GPU 없이 계속하려면 이 셀 상단의 REQUIRE_GPU = False 로 바꾸세요."
+        )
+
+VAR008_ALPHA, VAR008_BETA = 2.0, 0.3
+BASELINE_W1 = 0.1
+THRESHOLD_STANDING = 0.0135   # PROGRESS.md 의사결정 28 — 계속 쓰는 표준 임계값
+
+_W2_VALUES = (0.5, 1.0, 2.0)
+_W3_VALUES = (50.0, 100.0, 200.0)
+_GRID = [(w2, w3) for w2 in _W2_VALUES for w3 in _W3_VALUES]   # 9 cells, index = cell_idx
+assert len(_GRID) == 9
+
+def _cell_params(w2, w3):
+    return {"alpha": VAR008_ALPHA, "beta": VAR008_BETA, "w1": BASELINE_W1, "w2": w2, "w3": w3}
+
+# variant_id = cell_idx*2 + seed_slot (0 또는 1)
+variants = []
+for w2, w3 in _GRID:
+    variants.append(_cell_params(w2, w3))   # seed slot 0
+    variants.append(_cell_params(w2, w3))   # seed slot 1
+assert len(variants) == 18
+
+# ── 캐시 재사용 후보 검증 — 5개 값이 모두 일치할 때만 재사용 ────────────────
+def _params_match(existing: dict, target: dict, tol: float = 1e-9) -> bool:
+    defaults = {"alpha": 1.0, "beta": 0.1, "w1": 0.1, "w2": 2.0, "w3": 50.0}
+    for key in ("alpha", "beta", "w1", "w2", "w3"):
+        if abs(existing.get(key, defaults[key]) - target[key]) > tol:
+            return False
+    return True
+
+_REUSE_CANDIDATES = [
+    # (target cell (w2, w3), source 경로, source 라벨)
+    ((2.0, 50.0), Path(ROUND1_CACHE_DIR) / "stage1_var008.json", "Round 1 var008"),
+    ((1.0, 50.0), Path(PHASE1_CACHE_DIR) / "stage1_var002.json", "Phase 1 var002"),
+]
+print("=== 캐시 재사용 후보 검증 (5개 값 alpha/beta/w1/w2/w3 완전 일치 시에만 재사용) ===")
+for (w2, w3), src_path, label in _REUSE_CANDIDATES:
+    cell_idx = _GRID.index((w2, w3))
+    slot0_id = cell_idx * 2
+    dst_path = Path(PHASE2_CACHE_DIR) / f"stage1_var{slot0_id:03d}.json"
+    target = _cell_params(w2, w3)
+    if dst_path.exists():
+        print(f"  (w2={w2}, w3={w3}) slot0(var{slot0_id:03d}): 이미 재사용/학습된 캐시 있음 — 건너뜀")
+        continue
+    if not src_path.exists():
+        print(f"  ⚠️ (w2={w2}, w3={w3}): {src_path} 없음 — 재사용 불가, 슬롯 0 도 새로 학습합니다")
+        continue
+    src_data = json.loads(src_path.read_text())
+    if _params_match(src_data.get("params", {}), target):
+        copied = dict(src_data)
+        copied["variant_id"] = slot0_id   # 이 리스트 안에서의 위치로 재매핑
+        dst_path.write_text(json.dumps(copied), encoding="utf-8")
+        print(f"  ✅ (w2={w2}, w3={w3}) slot0(var{slot0_id:03d}) ← {label} 재사용 "
+              f"(score={src_data['metric']:.4f}, params 일치 확인됨)")
+    else:
+        print(f"  ❌ (w2={w2}, w3={w3}): {label} 의 params({src_data.get('params')}) 가 "
+              f"목표({target}) 와 다릅니다 — 재사용하지 않고 새로 학습합니다")
+
+_cache_hit_n = sum(
+    1 for i in range(len(variants)) if (Path(PHASE2_CACHE_DIR) / f"stage1_var{i:03d}.json").exists()
+)
+print(f"\n{len(variants)}개 중 {_cache_hit_n}개 캐시 재사용, {len(variants) - _cache_hit_n}개 신규 학습 "
+      f"(예상 추가 소요: 최대 {(len(variants) - _cache_hit_n) * 50}분)")
+
+from autoresearch.stage_runner import StageRunner
+
+runner = StageRunner(
+    train_fn=make_train_fn_real(n_envs=1, cache_dir=PHASE2_CACHE_DIR, round_n=2),   # wandb: step1_round2_*
+    max_workers=1,
+    stage1_timesteps=250_000,
+    stage1_keep_ratio=1.0,       # 스크리닝이 아니라 grid 자체를 측정하므로 탈락 없음
+    cache_dir=PHASE2_CACHE_DIR,
+)
+
+print(f"\n=== Phase 2 시작: {len(variants)} variants(9 cells × 2-seed) × 250K ===")
+results = runner.run_stage1(variants)
+scores = {r.variant_id: r.metric for r in results}
+
+# ── cell 별 2-seed 평균/range 집계 ───────────────────────────────────────────
+import statistics
+
+cell_stats = []
+for cell_idx, (w2, w3) in enumerate(_GRID):
+    s0, s1 = scores[cell_idx * 2], scores[cell_idx * 2 + 1]
+    cell_stats.append({
+        "w2": w2, "w3": w3, "scores": (s0, s1),
+        "mean": statistics.mean((s0, s1)), "range": abs(s1 - s0),
+    })
+
+mean_pairwise_range = statistics.mean(c["range"] for c in cell_stats)
+NOISE_THRESHOLD = max(mean_pairwise_range, THRESHOLD_STANDING)   # 더 보수적인 쪽 채택
+
+print(f"\n{'='*70}\nRound 2 Phase 2 — cell 별 2-seed 결과 (평균 내림차순)\n{'='*70}")
+print(f"이번 실험 실측 seed 편차(9-cell |Δ| 평균) = {mean_pairwise_range:.4f}  "
+      f"vs 표준 임계값(§10) = {THRESHOLD_STANDING:.4f}  → 채택: {NOISE_THRESHOLD:.4f}\n")
+
+cell_stats_sorted = sorted(cell_stats, key=lambda c: c["mean"], reverse=True)
+for rank, c in enumerate(cell_stats_sorted, start=1):
+    s0, s1 = c["scores"]
+    print(f"  {rank}. w2={c['w2']}, w3={c['w3']}  mean={c['mean']:.4f}  "
+          f"(seeds: {s0:.4f}, {s1:.4f}, range={c['range']:.4f})")
+
+# ── 순위 신뢰도 — 인접 cell 간 차이가 노이즈 이내면 같은 그룹으로 묶는다 ──────
+print(f"\n{'='*70}\n순위 신뢰도 판정 (임계값 {NOISE_THRESHOLD:.4f})\n{'='*70}")
+groups = [[cell_stats_sorted[0]]]
+for c in cell_stats_sorted[1:]:
+    if abs(c["mean"] - groups[-1][-1]["mean"]) < NOISE_THRESHOLD:
+        groups[-1].append(c)
+    else:
+        groups.append([c])
+
+for gi, group in enumerate(groups, start=1):
+    if len(group) == 1:
+        c = group[0]
+        print(f"  단독 {gi}그룹: w2={c['w2']}, w3={c['w3']} (mean={c['mean']:.4f})")
+    else:
+        members = ", ".join(f"(w2={c['w2']}, w3={c['w3']})" for c in group)
+        print(f"  구분 불가 {gi}그룹({len(group)}개, 서로 Δ<{NOISE_THRESHOLD:.4f}): {members}")
+
+top1, top2 = cell_stats_sorted[0], cell_stats_sorted[1]
+diff_top = abs(top1["mean"] - top2["mean"])
+print(f"\n1위 vs 2위 Δ={diff_top:.4f} (임계값 {NOISE_THRESHOLD:.4f})")
+if diff_top < NOISE_THRESHOLD:
+    print("→ 1위와 2위 구분 불가. 위 '구분 불가 그룹' 안에서 최종 선택은 다른 기준"
+          "(예: 재현성, 계산 비용, 안정성)으로 결정하거나 seed 를 늘려 재확인하세요.")
+else:
+    print(f"→ 1위 확정: w2={top1['w2']}, w3={top1['w3']} (mean={top1['mean']:.4f})")
+print(f"{'='*70}")
+```
+
+---
+
 ## 타임라인 예상 (무료 Colab T4, worker 1 — 순차 실행)
 
 | 단계 | 예상 시간 | 세션 내 완료 여부 |
@@ -1113,6 +1326,7 @@ print(f"{'='*70}")
 | Stage 2 (6 × 2M, worker 1) | ~12~14시간 | ⚠️ 세션 1개로 안 끝남 — 캐시로 이어서 진행 |
 | **Round 1 합계** | **~15~18시간** | ⚠️ 최소 2세션 필요. 무료 tier 사용량 한도는 고정 12시간이 아니라 최근 사용량에 따라 변동하므로 3세션 이상 걸릴 수 있음 |
 | Round 2 Phase 1 (6 × 250K, worker 1) | ~4.8~5.2시간 (중앙값 ~5.0시간, ~7.1~7.7 units) | ✅ (12시간 내), variant 단위 캐시로 재개 가능 |
+| Round 2 Phase 2 (9-cell × 2-seed = 18 슬롯, 캐시 재사용 2 → 신규 16 × 250K) | ~12.8~13.9시간 (중앙값 ~13.4시간, ~18.9~20.6 units) | ⚠️ 12시간 근접/초과 가능 — 세션 2개 대비, variant 단위 캐시로 재개 가능 |
 
 > **팁**: Stage 1 완료 후 결과 저장 확인 (셀 5 마지막 줄) → Stage 2는 새 세션에서 시작해도 캐시로 복구됩니다. Stage 2 개별 variant(약 2.2시간)는 세션 한도보다 훨씬 짧으므로, 세션이 끊겨도 대부분 "variant 경계"에서 끊기고 §8 의 "학습 도중" 복구 절차까지 필요한 경우는 드뭅니다.
 
